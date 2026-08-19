@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# stato runtime del paper trading
+paper_wallet.json
+fileBalance.txt
+fileCicloStart.txt
+cronoMacd.txt
