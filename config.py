@@ -26,3 +26,6 @@ ISOLATED = "n"
 
 # Cronologia/traccia scritta su file (come l'originale)
 CRONO_FILE = "cronoMacd.txt"
+
+# versione del bot (per banner e log)
+VERSION = "2026.08.20 claude"

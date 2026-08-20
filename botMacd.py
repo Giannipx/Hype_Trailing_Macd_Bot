@@ -48,7 +48,7 @@ class CryptoBot:
     def print_banner(self):
         rete = "MAINNET" if config.NETWORK == "mainnet" else "TESTNET"
         print("=" * 55)
-        print("HYPE TRAILING MACD BOT - Hyperliquid")
+        print("HYPE TRAILING MACD BOT - Hyperliquid  - ver: %s" % config.VERSION)
         print("=" * 55)
         if self.real == "y":
             print("Modalità:          ORDINI REALI (ordini veri su %s)" % rete)
@@ -115,22 +115,50 @@ class CryptoBot:
 
             now = datetime.datetime.now().replace(microsecond=0)
 
-            ohlcv = self.data_binance.ohlcv_data(self.market, self.timeframe, limit=self.limit)
-            closes = [c[4] for c in ohlcv]
+            # FIX: qualsiasi errore di rete/API qui non deve far morire il bot.
+            # Prima erano chiamate "nude": un timeout di Hyperliquid o dati
+            # insufficienti (candele < 35/50, RSI None) crashavano il processo
+            # (IndexError su histogram[-1] vuoto, TypeError su round(None)).
+            try:
+                ohlcv = self.data_binance.ohlcv_data(self.market, self.timeframe, limit=self.limit)
+                closes = [c[4] for c in ohlcv]
 
-            macd_line, signal_line, histogram = indicators.macd_series(closes)
-            rsi_values = indicators.rsi(closes, self.rsi_period)
-            sma1 = indicators.sma(closes, self.sma1_period)
-            sma2 = indicators.sma(closes, self.sma2_period)
+                # servono almeno slow+signal (26+9) candele per un MACD valido,
+                # sma2_period per la SMA50, rsi_period+1 per l'RSI.
+                min_richieste = max(self.sma2_period, self.rsi_period + 1, 35)
+                if len(closes) < min_richieste:
+                    print(f"Dati insufficienti: {len(closes)} candele (minimo {min_richieste}). Salto questo ciclo.")
+                    self.data_binance.cronoMacdString(
+                        f"SKIP ciclo: solo {len(closes)} candele ricevute (minimo {min_richieste})")
+                    continue
 
-            self.last_macd = round(macd_line[-1], 5)
-            self.last_signal = round(signal_line[-1], 5)
-            self.last_histogram = round(histogram[-1], 5)
-            self.last_rsi = round(rsi_values, 2)
-            self.sma1 = round(sma1, 2)
-            self.sma2 = round(sma2, 2)
+                macd_line, signal_line, histogram = indicators.macd_series(closes)
+                rsi_values = indicators.rsi(closes, self.rsi_period)
+                sma1 = indicators.sma(closes, self.sma1_period)
+                sma2 = indicators.sma(closes, self.sma2_period)
 
-            self.wallet()
+                if not histogram or not macd_line or not signal_line or rsi_values is None or sma1 is None or sma2 is None:
+                    print("Indicatori non calcolabili su questo batch di candele. Salto questo ciclo.")
+                    self.data_binance.cronoMacdString("SKIP ciclo: indicatori non calcolabili (dati insufficienti)")
+                    continue
+
+                self.last_macd = round(macd_line[-1], 5)
+                self.last_signal = round(signal_line[-1], 5)
+                self.last_histogram = round(histogram[-1], 5)
+                self.last_rsi = round(rsi_values, 2)
+                self.sma1 = round(sma1, 2)
+                self.sma2 = round(sma2, 2)
+
+                self.wallet()
+            except Exception as e:
+                # Errore di rete/API Hyperliquid o simile: logga e riprova al
+                # prossimo ciclo invece di terminare il processo.
+                print(f"Errore nel ciclo principale (rete/API/indicatori): {e}")
+                try:
+                    self.data_binance.cronoMacdString(f"ERRORE ciclo principale: {e}")
+                except Exception:
+                    pass
+                continue
 
             self.data_binance.cronoMacdString(
                 f"TRAIL MULTIPLER x{self.multiSize} | Price: {self.price} | "
@@ -173,7 +201,12 @@ class CryptoBot:
                     print(trend, "[ok]")
                     if self.last_rsi > 40:
                         print("RSI positivo [ok]")
-                        if self.cryptoCoin > 1:
+                        # FIX: era "self.cryptoCoin > 1", una soglia in UNITA' di
+                        # coin (funziona per HYPE ~20 unità, ma su BTC 0.003 non
+                        # supera mai 1 e la vendita non scatterebbe mai). Ora si
+                        # confronta il controvalore in USD, come già fatto per
+                        # stableCoin > 10.
+                        if (self.cryptoCoin * self.price) > 10:
                             print("Wallet Crypto [ok]")
                             if (self.price - self.stopSize) > self.priceMin:
                                 print("Prezzo medio superato [ok]")

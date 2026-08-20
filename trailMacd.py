@@ -107,24 +107,33 @@ class StopTrail:
                 else:
                     res = self.wallet_binance.buy(self.market, amount, self.price)
 
+                # FIX: prima si richiamava self.wallet() (che rifetcha il prezzo
+                # live) e SOLO DOPO si calcolava triggerPrice usando il NUOVO
+                # self.price - disallineato dal prezzo a cui l'ordine è stato
+                # davvero eseguito. Ora si fissa fill_price PRIMA del refresh e
+                # lo si usa per lo stop-loss e per i log, così restano coerenti
+                # con l'esecuzione reale anche se il mercato si è mosso nel
+                # frattempo.
+                fill_price = res.get("fill_price", self.price) if isinstance(res, dict) else self.price
+
                 self.wallet()  # aggiorna i saldi dopo l'acquisto
 
                 # Piazzo un ordine Sell Stop Loss (trigger HL, reduce_only)
-                triggerPrice = round(self.price - (self.stopsize * self.multiSize), 2)
-                sellPrice = round(self.price - (self.stopsize * self.multiSize) - (self.stopsize / 2), 2)
+                triggerPrice = round(fill_price - (self.stopsize * self.multiSize), 2)
+                sellPrice = round(fill_price - (self.stopsize * self.multiSize) - (self.stopsize / 2), 2)
                 amountOrder = self.wallet_binance.round_size(self.market, self.cryptoCoin)
                 if self.stoplossorder == "y":
                     self.wallet_binance.crea_ordine_sell_stop(self.market, amountOrder, triggerPrice, sellPrice)
                     self.wallet_binance.cronoMacdString("Creo Ordine Sell Stop", self.market, amountOrder, triggerPrice, sellPrice)
                 fee_t = res.get("fee", 0.0) if isinstance(res, dict) else 0.0
-                self.wallet_binance.cronoMacdString("BUY | Price: %.3f | Stop loss: %.3f | fee: %.4f | USDC: %.2f | %s: %.4f"
-                                                    % (self.price, self.stoploss, fee_t, self.stableCoin, self.cryptoName, self.cryptoCoin))
+                self.wallet_binance.cronoMacdString("BUY | Fill: %.3f | Stop loss: %.3f | fee: %.4f | USDC: %.2f | %s: %.4f"
+                                                    % (fill_price, self.stoploss, fee_t, self.stableCoin, self.cryptoName, self.cryptoCoin))
                 self.wallet_binance.cronoMacdString("pricemin : %.3f" % priceMin)
 
                 self.wallet_binance.write_ciclostart(priceMin)  # compro
 
                 now = datetime.now()
-                self.wallet_binance.cronoTradeMacd(now, "BUY", self.market, amount, self.price)
+                self.wallet_binance.cronoTradeMacd(now, "BUY", self.market, amount, fill_price)
 
                 print("Torno a MACD")
                 self.running = False  # torno a MACD
@@ -154,8 +163,18 @@ class StopTrail:
     def run(self):
         self.running = True
         while self.running:
-            self.print_status()
-            self.update_stop()
+            try:
+                self.print_status()
+                self.update_stop()
+            except Exception as e:
+                # FIX: come in botMacd.py, un errore di rete/API qui (get_price,
+                # candele, ordine) non deve terminare il processo mentre il
+                # trail è attivo e magari una posizione è aperta senza stop.
+                print(f"Errore nel trail ({self.type}): {e}")
+                try:
+                    self.data_binance.cronoMacdString(f"ERRORE trail {self.type}: {e}")
+                except Exception:
+                    pass
             time.sleep(self.interval)
 
     # WALLET*************************************************************

@@ -191,8 +191,15 @@ class Hyperliquid:
             return self._init_paper()
 
     def _save_paper(self, d):
-        with open(PAPER_WALLET_FILE, "w") as f:
+        # FIX: scrittura non atomica. Un crash/kill a metà "json.dump" lasciava
+        # paper_wallet.json corrotto, e _load_paper() in quel caso richiamava
+        # silenziosamente _init_paper(), azzerando PnL/trade simulati senza
+        # nessun avviso visibile. Ora si scrive su file temporaneo e si fa
+        # replace atomico solo a scrittura completata.
+        tmp_path = PAPER_WALLET_FILE + ".tmp"
+        with open(tmp_path, "w") as f:
             json.dump(d, f, indent=2)
+        os.replace(tmp_path, PAPER_WALLET_FILE)
 
     def read_wallet_iniziale(self):
         """Quantità iniziali dei token da walletIniziale.txt (riferimento)."""
@@ -222,8 +229,7 @@ class Hyperliquid:
         if self.real == "y":
             return
         self._init_paper()
-        with open("fileCicloStart.txt", "w") as f:
-            f.write("0")
+        self.write_ciclostart(0.0)
         self.cronoMacdString("PAPER WALLET RESET da walletIniziale.txt")
 
     def read_balance(self, pr):
@@ -236,8 +242,14 @@ class Hyperliquid:
             return float(file.readlines()[cc].strip())
 
     def write_ciclostart(self, pMin):
-        with open("fileCicloStart.txt", "w") as f:
+        # FIX: stessa scrittura non atomica di _save_paper. fileCicloStart.txt
+        # governa il gate "vendo solo sopra il prezzo medio d'acquisto": se
+        # viene letto a metà scrittura (o troncato da un crash), read_ciclostart
+        # può sollevare un IndexError su file vuoto e far cadere il bot.
+        tmp_path = "fileCicloStart.txt.tmp"
+        with open(tmp_path, "w") as f:
             f.write(str(pMin))
+        os.replace(tmp_path, "fileCicloStart.txt")
         self.cronoMacdString("Write Ciclostart", pMin)
 
     # ---- ordini (perp: market_open long / market_close) ----
