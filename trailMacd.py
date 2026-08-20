@@ -52,7 +52,6 @@ class StopTrail:
                         self.wallet_binance.elimina_ordine(self.market)
 
                     self.wallet()
-                    stableSell = self.stableBot
                     coinSell = self.coinBot
                     priceMin = 0
 
@@ -60,18 +59,22 @@ class StopTrail:
                     print("Selling | Amount: %.2f | Price: %.2f" % (coinSell, self.price))
                     # SELL (reale: market_close reduce_only | paper: wallet szi/USDC)
                     if self.real == "y" and self.cryptoCoin > 0:
-                        self.wallet_binance.sell(self.market, coinSell, self.price)
-                        self.wallet_binance.cronoMacdString("Sell triggered Real | Amount: %.2f | Price: %.2f" % (coinSell, self.price))
+                        res = self.wallet_binance.sell(self.market, coinSell, self.price)
+                        self.wallet_binance.cronoMacdString("Sell triggered Real | Amount: %.4f | Price: %.3f" % (coinSell, self.price))
                     else:
-                        self.wallet_binance.sell(self.market, coinSell, self.price)
+                        res = self.wallet_binance.sell(self.market, coinSell, self.price)
 
-                    self.data_binance.cronoMacdString("Sell triggered | Price: %.2f | Stop loss: %.2f" % (self.price, self.stoploss))
-                    self.data_binance.cronoMacdString("stable : %.2f | crypto : %.2f | pricemin : %.2f" % (self.stableBot, self.coinBot, priceMin))
+                    self.wallet()  # aggiorna i saldi dopo la vendita
+                    fee_t = res.get("fee", 0.0) if isinstance(res, dict) else 0.0
+                    pnl_t = res.get("pnl", 0.0) if isinstance(res, dict) else 0.0
+                    self.data_binance.cronoMacdString("SELL | Price: %.3f | Stop loss: %.3f | pnl: %.2f | fee: %.4f | USDC: %.2f | %s: %.4f"
+                                                      % (self.price, self.stoploss, pnl_t, fee_t, self.stableCoin, self.cryptoName, self.cryptoCoin))
+                    self.data_binance.cronoMacdString("pricemin : %.3f" % priceMin)
 
                     self.wallet_binance.write_ciclostart(priceMin)  # vendo
 
                     now = datetime.now()
-                    self.data_binance.cronoTradeMacd(now, "SELL", self.market, stableSell, self.price)
+                    self.data_binance.cronoTradeMacd(now, "SELL", self.market, coinSell, self.price)
 
                     print("Torno a MACD")
                     self.running = False  # Torno a Macd
@@ -97,12 +100,14 @@ class StopTrail:
                     self.sellOrderStopLoss = True  # ordine prevenzione stop loss
 
                 print("++++++++++++++++++++++++++++++++++++++++++")
-                print("Buying | Amount: %.2f | Price: %.2f" % (amount, self.price))
+                print("Buying | Amount: %.4f | Price: %.3f" % (amount, self.price))
                 # BUY (reale: market_open long | paper: wallet szi/USDC)
                 if self.real == "y" and self.stableCoin > 10:
-                    self.wallet_binance.buy(self.market, amount, self.price)
+                    res = self.wallet_binance.buy(self.market, amount, self.price)
                 else:
-                    self.wallet_binance.buy(self.market, amount, self.price)
+                    res = self.wallet_binance.buy(self.market, amount, self.price)
+
+                self.wallet()  # aggiorna i saldi dopo l'acquisto
 
                 # Piazzo un ordine Sell Stop Loss (trigger HL, reduce_only)
                 triggerPrice = round(self.price - (self.stopsize * self.multiSize), 2)
@@ -111,13 +116,15 @@ class StopTrail:
                 if self.stoplossorder == "y":
                     self.wallet_binance.crea_ordine_sell_stop(self.market, amountOrder, triggerPrice, sellPrice)
                     self.wallet_binance.cronoMacdString("Creo Ordine Sell Stop", self.market, amountOrder, triggerPrice, sellPrice)
-                self.wallet_binance.cronoMacdString("Buy triggered | Price: %.2f | Stop loss: %.2f" % (self.price, self.stoploss))
-                self.wallet_binance.cronoMacdString("stable : %.2f | crypto : %.2f | pricemin : %.2f" % (self.stableBot, self.coinBot, priceMin))
+                fee_t = res.get("fee", 0.0) if isinstance(res, dict) else 0.0
+                self.wallet_binance.cronoMacdString("BUY | Price: %.3f | Stop loss: %.3f | fee: %.4f | USDC: %.2f | %s: %.4f"
+                                                    % (self.price, self.stoploss, fee_t, self.stableCoin, self.cryptoName, self.cryptoCoin))
+                self.wallet_binance.cronoMacdString("pricemin : %.3f" % priceMin)
 
                 self.wallet_binance.write_ciclostart(priceMin)  # compro
 
                 now = datetime.now()
-                self.wallet_binance.cronoTradeMacd(now, "BUY", self.market, stableBuy, self.price)
+                self.wallet_binance.cronoTradeMacd(now, "BUY", self.market, amount, self.price)
 
                 print("Torno a MACD")
                 self.running = False  # torno a MACD

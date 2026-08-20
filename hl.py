@@ -240,8 +240,16 @@ class Hyperliquid:
             init = {"USDC": config.START_BALANCE_USD}
         self._write_balance_file(init)
         d = self._paper_default()
+        coin = self._coin(self.market)
         d["cash_usd"] = init.get("USDC", config.START_BALANCE_USD)
-        d["sz"] = init.get(self._coin(self.market), 0.0)
+        d["sz"] = init.get(coin, 0.0)
+        # le token iniziali vengono marcate a mercato (entry = prezzo attuale)
+        # così la prima vendita non registra un PnL "fantasma" a prezzo 0
+        if d["sz"] > 0:
+            try:
+                d["entry_px"] = self.get_price(coin)
+            except Exception:
+                d["entry_px"] = 0.0
         self._save_paper(d)
         with open("fileCicloStart.txt", "w") as f:
             f.write("0")
@@ -422,7 +430,8 @@ class Hyperliquid:
 
     def cronoTradeMacd(self, timex, tipo, pair, qty, priced):
         with open(config.CRONO_FILE, "a+") as fx:
-            fx.write("UTC  %s | %s | %s | Qty %s | Prezzo %.2f\n" % (timex, tipo, pair, qty, priced))
+            fx.write("UTC  %s | %s | %s | Qty %.4f | Prezzo %.3f\n"
+                     % (timex.strftime("%Y-%m-%d %H:%M:%S"), tipo, pair, float(qty), float(priced)))
 
     def cronoMacdString(self, *args):
         try:

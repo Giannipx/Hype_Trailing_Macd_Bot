@@ -117,7 +117,12 @@ class CryptoBot:
 
             self.wallet()
 
-            self.data_binance.cronoMacdString(f"TRAIL NEW MULTIPLER [{self.multiSize}] - Last price: {self.price} Bot Wallet {self.stableName}: {self.stableBot} - {self.cryptoName}: {self.coinBot}")
+            self.data_binance.cronoMacdString(
+                f"TRAIL MULTIPLER x{self.multiSize} | Price: {self.price} | "
+                f"MACD: {self.last_macd} | Signal: {self.last_signal} | Histo: {self.last_histogram} | "
+                f"RSI: {self.last_rsi} | SMA20: {self.sma1} | SMA50: {self.sma2} | "
+                f"{self.stableName}: {self.stableCoin:.2f} | {self.cryptoName}: {self.cryptoCoin:.4f} | "
+                f"trailBuy: {self.trailBuy} | trailSell: {self.trailSell}")
 
             print(f"********** WALLET [{self.walletType}] *************")
             print(f"TRAIL NEW MULTIPLER [{self.multiSize}]")
