@@ -116,9 +116,10 @@ except Exception as e:
     st.error("Errore inizializzazione Hyperliquid: %s" % e)
     st.stop()
 
-bal = read_token_file("fileBalance.txt")
+bal = read_paper_wallet()
 init = read_token_file("walletIniziale.txt")
-paper = read_paper_wallet()
+cash_usd = float(bal.get("cash_usd", 0.0))
+sz_pos = float(bal.get("sz", 0.0))
 price_min = read_ciclostart()
 
 # ---------- dati live (prezzi + candele) ----------
@@ -140,9 +141,9 @@ last_rsi = indicators.rsi(closes, period=14)
 sma20 = indicators.sma(closes, 20)
 sma50 = indicators.sma(closes, 50)
 
-# ---------- saldi per token con valore USD ----------
+# ---------- saldo attuale (cash USDC + posizione della coin) ----------
 token_rows = []
-for tok, amt in bal.items():
+for tok, amt in [("USDC", cash_usd), (symbol, sz_pos)]:
     mid = float(mids.get(tok, 0.0)) if tok in mids else None
     usd = amt * mid if mid else None
     token_rows.append({
@@ -152,11 +153,11 @@ for tok, amt in bal.items():
         "Valore USD": fmt_usd(usd),
     })
 
-equity = paper.get("cash_usd", bal.get("USDC", 0.0)) + paper.get("sz", 0.0) * (price or 0.0)
+equity = cash_usd + sz_pos * (price or 0.0)
 
 # ---------- stato trail inferito (come nel bot) ----------
-stable_coin = bal.get("USDC", 0.0)
-crypto_coin = bal.get(symbol, 0.0)
+stable_coin = cash_usd
+crypto_coin = sz_pos
 stable_bot = round(stable_coin * float(params.get("PERC_STABLE", 0.1)), 2)
 coin_bot = round(crypto_coin * float(params.get("PERC_COIN", 1.0)), 4)
 trail_sell = price is not None and price > price_min and crypto_coin > 0
@@ -209,9 +210,9 @@ c1.metric("Prezzo HYPE", fmt_price(price))
 c2.metric("Capitale Paper (USD)", fmt_usd(equity))
 c3.metric("USDC", fmt_usd(stable_coin))
 c4.metric("HYPE", "%g" % crypto_coin)
-c5.metric("PnL realizzato", fmt_usd(paper.get("realized_pnl_usd")))
-c6.metric("Fee totali", fmt_usd(paper.get("fees_usd")))
-c7.metric("Trade", paper.get("n_trades", 0))
+c5.metric("PnL realizzato", fmt_usd(bal.get("realized_pnl_usd")))
+c6.metric("Fee totali", fmt_usd(bal.get("fees_usd")))
+c7.metric("Trade", bal.get("n_trades", 0))
 c8.metric("RSI (14)", "%.2f" % last_rsi if last_rsi is not None else "-")
 
 tab_wallet, tab_prezzo, tab_log = st.tabs(["Wallet e saldi", "Prezzo e indicatori", "Attività (log)"])
@@ -220,7 +221,7 @@ tab_wallet, tab_prezzo, tab_log = st.tabs(["Wallet e saldi", "Prezzo e indicator
 # TAB 1 - WALLET E SALDI
 # ============================================================
 with tab_wallet:
-    st.subheader("Bilanci attuali (fileBalance.txt)")
+    st.subheader("Saldo attuale (paper_wallet.json)")
     st.dataframe(pd.DataFrame(token_rows), hide_index=True)
     st.caption("Valore USD calcolato a prezzo live di mercato.")
 
@@ -229,14 +230,14 @@ with tab_wallet:
         st.subheader("Wallet iniziale (walletIniziale.txt)")
         st.dataframe(pd.DataFrame(list(init.items()), columns=["Token", "Quantità"]), hide_index=True)
     with col_b:
-        st.subheader("Wallet paper (paper_wallet.json)")
+        st.subheader("Dettagli wallet paper (paper_wallet.json)")
         paper_rows = [
-            {"Campo": "Cash USDC", "Valore": fmt_usd(paper.get("cash_usd"))},
-            {"Campo": "Posizione HYPE", "Valore": "%g" % paper.get("sz", 0.0)},
-            {"Campo": "Prezzo medio entry", "Valore": fmt_price(paper.get("entry_px"))},
-            {"Campo": "PnL realizzato", "Valore": fmt_usd(paper.get("realized_pnl_usd"))},
-            {"Campo": "Fee totali", "Valore": fmt_usd(paper.get("fees_usd"))},
-            {"Campo": "Trade eseguiti", "Valore": paper.get("n_trades", 0)},
+            {"Campo": "Cash USDC", "Valore": fmt_usd(bal.get("cash_usd"))},
+            {"Campo": "Posizione HYPE", "Valore": "%g" % bal.get("sz", 0.0)},
+            {"Campo": "Prezzo medio entry", "Valore": fmt_price(bal.get("entry_px"))},
+            {"Campo": "PnL realizzato", "Valore": fmt_usd(bal.get("realized_pnl_usd"))},
+            {"Campo": "Fee totali", "Valore": fmt_usd(bal.get("fees_usd"))},
+            {"Campo": "Trade eseguiti", "Valore": bal.get("n_trades", 0)},
         ]
         st.dataframe(pd.DataFrame(paper_rows), hide_index=True)
     with col_c:

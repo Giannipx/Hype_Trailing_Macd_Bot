@@ -29,8 +29,20 @@ class CryptoBot:
         self.trailBuy = False
         self.trailSell = False
         self.walletType = "Null"  # Reale o test
-        self.wallet_binance.reset_balance()  # ripristina il balance all'avvio
+        self._prompt_reset_paper()  # chiede se si vuole resettare il wallet paper
         self.wallet()
+
+    def _prompt_reset_paper(self):
+        """All'avvio chiede se resettare il wallet paper (paper_wallet.json)
+        ricominciando dai valori di walletIniziale.txt. Solo in paper mode."""
+        if self.real == "y":
+            return
+        try:
+            ans = input("Vuoi resettare il wallet paper (riparte da walletIniziale.txt)? [y/N]: ")
+        except EOFError:
+            ans = ""  # avvio non interattivo: nessun reset
+        if ans.strip().lower() == "y":
+            self.wallet_binance.reset_balance()
 
     # BANNER*********************************************
     def print_banner(self):
@@ -59,7 +71,10 @@ class CryptoBot:
         print("  Wallet iniziale (%s):" % "walletIniziale.txt")
         for tok, val in self.wallet_binance.read_wallet_iniziale().items():
             print("    %s: %s" % (tok, val))
-        print("  Balance (%s): %s" % ("fileBalance.txt", self.wallet_binance.balance_string()))
+        pw = self.wallet_binance.paper_wallet_dump()
+        print("  Paper wallet (%s): USDC: %.2f | %s: %.4f | entry: %.3f | PnL: %.2f | fee: %.2f | trade: %d" %
+              ("paper_wallet.json", pw["cash_usd"], self.cryptoName, pw["sz"], pw["entry_px"],
+               pw["realized_pnl_usd"], pw["fees_usd"], pw["n_trades"]))
         print("=" * 55)
         if self.real == "y":
             print("      Modalità REALE attiva: ordini veri su Hyperliquid %s - verifica chiavi e bilanci in config.py" % rete)
@@ -135,7 +150,8 @@ class CryptoBot:
             print(f"Last price: {self.price} - Prezzo Minimo: {self.priceMin} ")
 
             print(f"  {self.walletType} Wallet {self.stableName}: {self.stableCoin:.3f} - {self.cryptoName}: {self.cryptoCoin:.4f}")
-            print("  " + self.wallet_binance.balance_string())
+            pw = self.wallet_binance.paper_wallet_dump()
+            print(f"  Paper wallet: entry {pw['entry_px']:.3f} | PnL {pw['realized_pnl_usd']:.2f} | fee {pw['fees_usd']:.2f} | trade {pw['n_trades']}")
             print(f"  Bot Wallet {self.stableName}: {self.stableBot} - {self.cryptoName}: {self.coinBot} [{self.cryptoCoinOrder}]")
 
             print(f"BUY: {self.trailBuy} - SELL: {self.trailSell}")

@@ -16,7 +16,7 @@ python jbmainMacd.py --file hype.txt
 - `REAL=n` (default): paper trading — live mainnet prices, simulated `paper_wallet.json` balance. No keys required.
 - `REAL=y`: real orders on mainnet; requires `HL_ACCOUNT_ADDRESS` + `HL_SECRET_KEY` in `config.py`. `NETWORK` supports `mainnet`/`testnet`.
 - `LLEVERE`-equivalent is `LEVERAGE`; `ISOLATED`="y" → isolated margin, else cross.
-- Paper state is gitignored in `paper_wallet.json`. The per-token balance lives in `fileBalance.txt` (reset to `walletIniziale.txt` at every start via `reset_balance` in `hl.py`, then updated on each buy/sell); `fileCicloStart.txt` and `cronoMacd.txt` are tracked runtime files. `fileCicloStart.txt` stores the buy price that gates trailing sells (`write_ciclostart`).
+- Paper state is gitignored in `paper_wallet.json`. At startup the bot asks whether to reset the paper wallet from `walletIniziale.txt` (`_prompt_reset_paper` / `reset_balance` in `botMacd.py`/`hl.py`); `fileCicloStart.txt` and `cronoMacd.txt` are tracked runtime files. `fileCicloStart.txt` stores the buy price that gates trailing sells (`write_ciclostart`).
 
 ## Hyperliquid wrapper gotchas (`hl.py`)
 

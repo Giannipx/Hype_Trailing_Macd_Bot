@@ -32,7 +32,6 @@ import config
 
 
 PAPER_WALLET_FILE = "paper_wallet.json"
-BALANCE_FILE = "fileBalance.txt"
 WALLET_INIZIALE_FILE = "walletIniziale.txt"
 
 
@@ -162,53 +161,41 @@ class Hyperliquid:
             "n_trades": 0,
         }
 
+    def _init_paper(self):
+        """Crea il wallet paper partendo dai valori di walletIniziale.txt
+        (cash USDC e quantità della coin marcata a mercato)."""
+        d = self._paper_default()
+        init = self.read_wallet_iniziale()
+        d["cash_usd"] = init.get("USDC", config.START_BALANCE_USD)
+        coin = self._coin(self.market)
+        d["sz"] = init.get(coin, 0.0)
+        # le token iniziali vengono marcate a mercato (entry = prezzo attuale)
+        # così la prima vendita non registra un PnL "fantasma" a prezzo 0
+        if d["sz"] > 0:
+            try:
+                d["entry_px"] = self.get_price(self.market)
+            except Exception:
+                d["entry_px"] = 0.0
+        self._save_paper(d)
+        return d
+
     def _load_paper(self):
         if not os.path.exists(PAPER_WALLET_FILE):
-            # migrazione dallo stile binario fileBalance.txt se presente
-            d = self._paper_default()
-            if os.path.exists("fileBalance.txt"):
-                try:
-                    with open("fileBalance.txt", "r") as f:
-                        d["cash_usd"] = float(f.readlines()[0].strip())
-                except Exception:
-                    pass
-            self._save_paper(d)
-            return d
+            # primo avvio: il wallet paper parte dai valori di walletIniziale.txt
+            return self._init_paper()
         try:
             with open(PAPER_WALLET_FILE, "r") as f:
                 return json.load(f)
         except Exception:
-            return self._paper_default()
+            # file corrotto o vuoto (es. crash): ricrea da walletIniziale.txt
+            return self._init_paper()
 
     def _save_paper(self, d):
         with open(PAPER_WALLET_FILE, "w") as f:
             json.dump(d, f, indent=2)
 
-    # ---- balance file per token (fileBalance.txt) ----
-    def _read_balance_file(self):
-        """Legge fileBalance.txt -> {'USDC': 1000, 'HYPE': 20, ...}."""
-        tokens = {}
-        if not os.path.exists(BALANCE_FILE):
-            return tokens
-        with open(BALANCE_FILE, "r") as f:
-            for line in f:
-                line = line.strip()
-                if ":" not in line:
-                    continue
-                tok, val = line.split(":", 1)
-                try:
-                    tokens[tok.strip()] = float(val.strip())
-                except ValueError:
-                    pass
-        return tokens
-
-    def _write_balance_file(self, tokens):
-        with open(BALANCE_FILE, "w") as f:
-            for tok, val in tokens.items():
-                f.write("%s: %s\n" % (tok, val))
-
     def read_wallet_iniziale(self):
-        """Quantità iniziali dei token da walletIniziale.txt."""
+        """Quantità iniziali dei token da walletIniziale.txt (riferimento)."""
         tokens = {}
         if not os.path.exists(WALLET_INIZIALE_FILE):
             return tokens
@@ -224,43 +211,25 @@ class Hyperliquid:
                     pass
         return tokens
 
-    def balance_string(self):
-        """Riga leggibile del wallet paper (tutti i token del file balance)."""
-        b = self._read_balance_file()
-        return " - ".join("%s: %s" % (tok, val) for tok, val in b.items())
+    def paper_wallet_dump(self):
+        """Ritorna il dict del wallet paper (cash USDC, posizione, entry, PnL...)."""
+        return self._load_paper()
 
     def reset_balance(self):
-        """All'avvio del bot ripristina fileBalance.txt dai valori di
-        walletIniziale.txt e azzera il wallet paper (paper_wallet.json e
-        fileCicloStart.txt). Solo paper: in reale non si tocca nulla."""
+        """Azzera il wallet paper: riparte dai valori di walletIniziale.txt
+        (USDC e quantità della coin) e azzera fileCicloStart.txt. Solo paper:
+        in reale non si tocca nulla."""
         if self.real == "y":
             return
-        init = self.read_wallet_iniziale()
-        if not init:
-            init = {"USDC": config.START_BALANCE_USD}
-        self._write_balance_file(init)
-        d = self._paper_default()
-        coin = self._coin(self.market)
-        d["cash_usd"] = init.get("USDC", config.START_BALANCE_USD)
-        d["sz"] = init.get(coin, 0.0)
-        # le token iniziali vengono marcate a mercato (entry = prezzo attuale)
-        # così la prima vendita non registra un PnL "fantasma" a prezzo 0
-        if d["sz"] > 0:
-            try:
-                d["entry_px"] = self.get_price(coin)
-            except Exception:
-                d["entry_px"] = 0.0
-        self._save_paper(d)
+        self._init_paper()
         with open("fileCicloStart.txt", "w") as f:
             f.write("0")
         self.cronoMacdString("PAPER WALLET RESET da walletIniziale.txt")
 
     def read_balance(self, pr):
-        """PAPER: legge da fileBalance.txt (USDC se pr==0, coin del market se pr==1)."""
-        b = self._read_balance_file()
-        if pr == 0:
-            return float(b.get("USDC", 0.0))
-        return float(b.get(self._coin(self.market), 0.0))
+        """PAPER: legge il wallet paper (USDC se pr==0, posizione coin se pr==1)."""
+        d = self._load_paper()
+        return float(d["cash_usd"]) if pr == 0 else float(d["sz"])
 
     def read_ciclostart(self, cc):
         with open("fileCicloStart.txt", "r") as file:
@@ -306,10 +275,6 @@ class Hyperliquid:
             d["sz"] = old_sz + sz
             d["fees_usd"] = float(d["fees_usd"]) + fee
             self._save_paper(d)
-            b = self._read_balance_file()
-            b["USDC"] = float(b.get("USDC", config.START_BALANCE_USD)) - sz * price - fee
-            b[coin] = float(b.get(coin, 0.0)) + sz
-            self._write_balance_file(b)
             self.cronoMacdString("PAPER BUY", coin, "sz", sz, "@", price, "fee", round(fee, 4))
             return {"paper": True, "coin": coin, "sz": sz, "fill_price": price, "fee": fee}
         except Exception as e:
@@ -341,12 +306,6 @@ class Hyperliquid:
             d["fees_usd"] = float(d["fees_usd"]) + fee
             d["n_trades"] = int(d["n_trades"]) + 1
             self._save_paper(d)
-            b = self._read_balance_file()
-            b["USDC"] = float(b.get("USDC", config.START_BALANCE_USD)) + sz * price - fee
-            b[coin] = float(b.get(coin, 0.0)) - sz
-            if b[coin] < 0:
-                b[coin] = 0.0
-            self._write_balance_file(b)
             self.cronoMacdString("PAPER SELL", coin, "sz", sz, "@", price,
                                  "pnl", round(realized, 4), "fee", round(fee, 4))
             return {"paper": True, "coin": coin, "sz": sz, "fill_price": price, "fee": fee, "pnl": realized}

@@ -6,7 +6,7 @@ Bot di trading in Python per **perpetual futures su Hyperliquid**, basato su seg
 
 - Segnali MACD + RSI per decidere compra/vendi, con doppio controllo sul trend dell'istogramma.
 - Trailing stop (`StopTrail`): dopo un segnale, il bot segue il prezzo a intervalli regolari e aggiorna lo stop loss solo quando il prezzo si muove a favore; il trade parte quando lo stop viene toccato.
-- **Paper trading** di default: prezzi reali da mainnet, wallet simulato in `fileBalance.txt` (ripristinato a ogni avvio da `walletIniziale.txt`) e dettagli in `paper_wallet.json`. Nessuna chiave richiesta.
+- **Paper trading** di default: prezzi reali da mainnet, wallet simulato in `paper_wallet.json` (ripristinabile a ogni avvio dai valori di `walletIniziale.txt`). Nessuna chiave richiesta.
 - **Trading reale** su mainnet (perpetual HYPE) con `market_open` / `market_close`.
 - Indicatori in puro Python (niente pandas/ta).
 
@@ -60,7 +60,7 @@ Le altre impostazioni (chiavi API, leva, margine, rete, fee) sono in `config.py`
 python jbmainMacd.py --file hype.txt
 ```
 
-Il bot gira in un loop infinito (termina con Ctrl+C). Il balance paper (`fileBalance.txt`) viene ripristinato a ogni avvio dai valori di `walletIniziale.txt`; `fileCicloStart.txt` e `cronoMacd.txt` sono file runtime committati (valori solo simulati), mentre `paper_wallet.json` resta gitignored.
+Il bot gira in un loop infinito (termina con Ctrl+C). All'avvio chiede se si vuole resettare il wallet paper (`paper_wallet.json`) partendo dai valori di `walletIniziale.txt`; `fileCicloStart.txt` e `cronoMacd.txt` sono file runtime committati (valori solo simulati), mentre `paper_wallet.json` resta gitignored.
 
 ## Dashboard web (Streamlit)
 
@@ -72,7 +72,7 @@ streamlit run dashboard.py -- --file hype.txt
 La dashboard mostra in tempo reale (auto-refresh regolabile nella sidebar):
 
 - Parametri strategia e configurazione (`hype.txt` + `config.py`);
-- Saldi e wallet: `fileBalance.txt`, `walletIniziale.txt`, dettagli `paper_wallet.json` e valore USD di ogni token a prezzo live;
+- Saldi e wallet: `walletIniziale.txt` (riferimento iniziale) e dettagli `paper_wallet.json` con valore USD di USDC e posizione a prezzo live;
 - Prezzo, candele, indicatori (MACD/Signal/Histogram, RSI, SMA20/50);
 - Log attività (`cronoMacd.txt`) con filtro libero.
 
