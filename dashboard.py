@@ -98,6 +98,20 @@ def fmt_usd(v):
 
 st.set_page_config(page_title="HYPE Trailing MACD Bot - Dashboard", layout="wide")
 
+# font più compatti per le metriche (utile su schermi piccoli)
+st.markdown("""
+<style>
+[data-testid="stMetricValue"] { font-size: 1.05rem; }
+[data-testid="stMetricLabel"] { font-size: 0.72rem; }
+[data-testid="stMetric"] { padding: 0.2rem 0.4rem; }
+@media (max-width: 640px) {
+  [data-testid="stMetricValue"] { font-size: 0.85rem; }
+  [data-testid="stMetricLabel"] { font-size: 0.62rem; }
+  h1 { font-size: 1.3rem; }
+}
+</style>
+""", unsafe_allow_html=True)
+
 args = parse_args()
 params = load_params(args.file)
 if not params:
