@@ -1,0 +1,24 @@
+--> 2026-08-20 08:51:12 PAPER WALLET RESET da walletIniziale.txt|
+--> 2026-08-20 08:52:00 TRAIL MULTIPLER x3.0 | Price: 71.964 | MACD: 0.14613 | Signal: 0.12621 | Histo: 0.01992 | RSI: 60.84 | SMA20: 71.76 | SMA50: 71.61 | USDC: 1000.00 | HYPE: 20.0000 | trailBuy: True | trailSell: True|
+--> 2026-08-20 08:53:00 TRAIL MULTIPLER x3.0 | Price: 72.0225 | MACD: 0.15038 | Signal: 0.13167 | Histo: 0.01871 | RSI: 62.91 | SMA20: 71.81 | SMA50: 71.62 | USDC: 1000.00 | HYPE: 20.0000 | trailBuy: True | trailSell: True|
+UTC  2026-08-20 08:53:00 | Histo: 0.018710 | Macd: 0.150380 | Signal: 0.131670 | Trend: MACD: Diminuzione positivo | Rsi: 62.91 | Tipo: sell
+--> 2026-08-20 09:01:13 PAPER SELL|HYPE|sz|20.0|@|72.91|pnl|18.0196|fee|0.5104|
+--> 2026-08-20 09:01:13 SELL | Price: 72.910 | Stop loss: 72.916 | pnl: 18.02 | fee: 0.5104 | USDC: 2457.69 | HYPE: 0.0000|
+--> 2026-08-20 09:01:13 pricemin : 0.000|
+--> 2026-08-20 09:01:13 Write Ciclostart|0|
+UTC  2026-08-20 09:01:13 | SELL | HYPE | Qty 20.0000 | Prezzo 72.910
+--> 2026-08-20 09:02:01 TRAIL MULTIPLER x3.0 | Price: 73.1945 | MACD: 0.39195 | Signal: 0.3025 | Histo: 0.08946 | RSI: 78.68 | SMA20: 72.36 | SMA50: 71.79 | USDC: 2457.69 | HYPE: 0.0000 | trailBuy: True | trailSell: False|
+--> 2026-08-20 09:03:00 TRAIL MULTIPLER x3.0 | Price: 73.404 | MACD: 0.42915 | Signal: 0.33011 | Histo: 0.09904 | RSI: 80.71 | SMA20: 72.45 | SMA50: 71.82 | USDC: 2457.69 | HYPE: 0.0000 | trailBuy: True | trailSell: False|
+--> 2026-08-20 09:04:00 TRAIL MULTIPLER x3.0 | Price: 73.46 | MACD: 0.44734 | Signal: 0.35398 | Histo: 0.09336 | RSI: 81.14 | SMA20: 72.52 | SMA50: 71.84 | USDC: 2457.69 | HYPE: 0.0000 | trailBuy: True | trailSell: False|
+--> 2026-08-20 09:05:01 TRAIL MULTIPLER x3.0 | Price: 73.3775 | MACD: 0.44857 | Signal: 0.37216 | Histo: 0.07641 | RSI: 79.1 | SMA20: 72.59 | SMA50: 71.87 | USDC: 2457.69 | HYPE: 0.0000 | trailBuy: True | trailSell: False|
+--> 2026-08-20 09:06:00 TRAIL MULTIPLER x3.0 | Price: 73.7525 | MACD: 0.50299 | Signal: 0.40331 | Histo: 0.09968 | RSI: 83.13 | SMA20: 72.7 | SMA50: 71.91 | USDC: 2457.69 | HYPE: 0.0000 | trailBuy: True | trailSell: False|
+--> 2026-08-20 09:07:01 TRAIL MULTIPLER x3.0 | Price: 73.7535 | MACD: 0.51022 | Signal: 0.42418 | Histo: 0.08604 | RSI: 81.38 | SMA20: 72.8 | SMA50: 71.95 | USDC: 2457.69 | HYPE: 0.0000 | trailBuy: True | trailSell: False|
+--> 2026-08-20 09:08:00 TRAIL MULTIPLER x3.0 | Price: 73.7405 | MACD: 0.50708 | Signal: 0.42351 | Histo: 0.08356 | RSI: 79.87 | SMA20: 72.79 | SMA50: 71.95 | USDC: 2457.69 | HYPE: 0.0000 | trailBuy: True | trailSell: False|
+--> 2026-08-20 09:09:00 TRAIL MULTIPLER x3.0 | Price: 73.9715 | MACD: 0.52551 | Signal: 0.44395 | Histo: 0.08156 | RSI: 82.3 | SMA20: 72.9 | SMA50: 71.99 | USDC: 2457.69 | HYPE: 0.0000 | trailBuy: True | trailSell: False|
+--> 2026-08-20 09:10:01 TRAIL MULTIPLER x3.0 | Price: 74.2285 | MACD: 0.57324 | Signal: 0.4877 | Histo: 0.08554 | RSI: 84.68 | SMA20: 73.13 | SMA50: 72.11 | USDC: 2457.69 | HYPE: 0.0000 | trailBuy: True | trailSell: False|
+--> 2026-08-20 09:11:00 TRAIL MULTIPLER x3.0 | Price: 74.3505 | MACD: 0.58155 | Signal: 0.48938 | Histo: 0.09217 | RSI: 85.47 | SMA20: 73.13 | SMA50: 72.11 | USDC: 2457.69 | HYPE: 0.0000 | trailBuy: True | trailSell: False|
+--> 2026-08-20 09:12:00 TRAIL MULTIPLER x3.0 | Price: 74.3215 | MACD: 0.59548 | Signal: 0.52718 | Histo: 0.0683 | RSI: 84.24 | SMA20: 73.36 | SMA50: 72.25 | USDC: 2457.69 | HYPE: 0.0000 | trailBuy: True | trailSell: False|
+--> 2026-08-20 09:13:01 TRAIL MULTIPLER x3.0 | Price: 74.3985 | MACD: 0.59888 | Signal: 0.54238 | Histo: 0.0565 | RSI: 83.68 | SMA20: 73.47 | SMA50: 72.32 | USDC: 2457.69 | HYPE: 0.0000 | trailBuy: True | trailSell: False|
+--> 2026-08-20 09:14:00 TRAIL MULTIPLER x3.0 | Price: 74.0285 | MACD: 0.5649 | Signal: 0.53559 | Histo: 0.02931 | RSI: 67.12 | SMA20: 73.45 | SMA50: 72.31 | USDC: 2457.69 | HYPE: 0.0000 | trailBuy: True | trailSell: False|
+--> 2026-08-20 09:15:00 TRAIL MULTIPLER x3.0 | Price: 74.0625 | MACD: 0.53902 | Signal: 0.53624 | Histo: 0.00278 | RSI: 68.88 | SMA20: 73.54 | SMA50: 72.38 | USDC: 2457.69 | HYPE: 0.0000 | trailBuy: True | trailSell: False|
+--> 2026-08-20 09:16:01 TRAIL MULTIPLER x3.0 | Price: 73.8785 | MACD: 0.46025 | Signal: 0.51499 | Histo: -0.05474 | RSI: 62.9 | SMA20: 73.67 | SMA50: 72.49 | USDC: 2457.69 | HYPE: 0.0000 | trailBuy: True | trailSell: False|
