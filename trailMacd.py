@@ -9,9 +9,18 @@ from hl import Hyperliquid
 # reale via market_open/market_close).
 
 class StopTrail:
-    def __init__(self, market, type, stopsize, interval, multiSize, percStable, percCoin, real, stoplossorder):
-        self.wallet_binance = Hyperliquid(real=real, market=market)
-        self.data_binance = Hyperliquid(real=real, market=market)
+    def __init__(self, market, type, stopsize, interval, multiSize, percStable, percCoin, real, stoplossorder,
+                 wallet_instance=None, data_instance=None):
+        # FIX: le istanze Hyperliquid vengono condivise con quelle di CryptoBot
+        # invece di crearne di nuove ad ogni trade. Prima se ne aprivano 2 qui +
+        # 2 in CryptoBot (overhead REST inutile) e _leverage_set era per-istanza,
+        # quindi update_leverage veniva richiamato a ogni ciclo StopTrail.
+        if wallet_instance is not None and data_instance is not None:
+            self.wallet_binance = wallet_instance
+            self.data_binance = data_instance
+        else:
+            self.wallet_binance = Hyperliquid(real=real, market=market)
+            self.data_binance = Hyperliquid(real=real, market=market)
         self.market = market
         self.type = type
         self.stopsize = stopsize
@@ -64,6 +73,13 @@ class StopTrail:
                     else:
                         res = self.wallet_binance.sell(self.market, coinSell, self.price)
 
+                    # FIX: l'ordine è già stato eseguito: il trail va chiuso PRIMA
+                    # delle scritture su file (write_ciclostart/log). Se una di
+                    # queste fallisse, il try/except di run() non deve far
+                    # ripartire il loop e rieseguire la stessa vendita (ordine
+                    # duplicato / market_close ripetuto all'infinito).
+                    self.running = False
+
                     self.wallet()  # aggiorna i saldi dopo la vendita
                     fee_t = res.get("fee", 0.0) if isinstance(res, dict) else 0.0
                     pnl_t = res.get("pnl", 0.0) if isinstance(res, dict) else 0.0
@@ -77,7 +93,6 @@ class StopTrail:
                     self.data_binance.cronoTradeMacd(now, "SELL", self.market, coinSell, self.price)
 
                     print("Torno a MACD")
-                    self.running = False  # Torno a Macd
 
                 else:
                     print("prezzo minimo non superato [no]")
@@ -116,15 +131,20 @@ class StopTrail:
                 # frattempo.
                 fill_price = res.get("fill_price", self.price) if isinstance(res, dict) else self.price
 
+                # FIX: stessa regola del ramo sell: l'ordine è già eseguito,
+                # chiudo il trail PRIMA delle scritture file per non ri-eseguire
+                # il buy se write_ciclostart/log fallissero.
+                self.running = False
+
                 self.wallet()  # aggiorna i saldi dopo l'acquisto
 
-                # Piazzo un ordine Sell Stop Loss (trigger HL, reduce_only)
+                # Piazzo un ordine Sell Stop Loss (trigger HL, reduce_only,
+                # isMarket=True: esegue anche su gap veloci)
                 triggerPrice = round(fill_price - (self.stopsize * self.multiSize), 2)
-                sellPrice = round(fill_price - (self.stopsize * self.multiSize) - (self.stopsize / 2), 2)
                 amountOrder = self.wallet_binance.round_size(self.market, self.cryptoCoin)
                 if self.stoplossorder == "y":
-                    self.wallet_binance.crea_ordine_sell_stop(self.market, amountOrder, triggerPrice, sellPrice)
-                    self.wallet_binance.cronoMacdString("Creo Ordine Sell Stop", self.market, amountOrder, triggerPrice, sellPrice)
+                    self.wallet_binance.crea_ordine_sell_stop(self.market, amountOrder, triggerPrice, triggerPrice)
+                    self.wallet_binance.cronoMacdString("Creo Ordine Sell Stop", self.market, amountOrder, triggerPrice, triggerPrice)
                 fee_t = res.get("fee", 0.0) if isinstance(res, dict) else 0.0
                 self.wallet_binance.cronoMacdString("BUY | Fill: %.3f | Stop loss: %.3f | fee: %.4f | USDC: %.2f | %s: %.4f"
                                                     % (fill_price, self.stoploss, fee_t, self.stableCoin, self.cryptoName, self.cryptoCoin))
@@ -136,7 +156,6 @@ class StopTrail:
                 self.wallet_binance.cronoTradeMacd(now, "BUY", self.market, amount, fill_price)
 
                 print("Torno a MACD")
-                self.running = False  # torno a MACD
 
     # PRINT************************************************************************
     def print_status(self):
@@ -152,9 +171,9 @@ class StopTrail:
         print("Diff: %.3f" % (self.stoploss - self.price))
         print("  Prezzo Minimo: %.3f" % self.priceMin)
         print("****** Wallet " + self.walletType)
-        print(f"{self.stableName}: {self.stableCoin} - {self.cryptoName}: {self.cryptoCoin} [{self.cryptoCoinOrder}]")
+        print(f"{self.stableName}: {self.stableCoin:.2f} - {self.cryptoName}: {self.cryptoCoin} [{self.cryptoCoinOrder}]")
         print("wallet bot-----")
-        print(f"{self.stableName}: {self.stableBot} - {self.cryptoName}: {self.coinBot}")
+        print(f"{self.stableName}: {self.stableBot:.2f} - {self.cryptoName}: {self.coinBot}")
         print("---------------------")
 
     # RUN*******************************************

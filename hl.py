@@ -263,6 +263,33 @@ class Hyperliquid:
         )
         self._leverage_set = True
 
+    def _normalize_order_result(self, result, fallback_price):
+        """Uniforma la risposta dell'SDK (reale) in un dict con la stessa
+        forma del ramo paper. Il prezzo di fill (avgPx) viene estratto dagli
+        statuses della risposta market_open/market_close: altrimenti si usa
+        il prezzo passato in chiamata. Ritorna dict o None se l'ordine è
+        stato rifiutato."""
+        if not isinstance(result, dict):
+            return None
+        status = result.get("status")
+        avg_px = fallback_price
+        try:
+            statuses = result["response"]["data"]["statuses"]
+            if statuses and isinstance(statuses[0], dict):
+                s0 = statuses[0]
+                if "filled" in s0:
+                    avg_px = float(s0["filled"].get("avgPx", fallback_price))
+                elif "resting" not in s0 and "error" in s0:
+                    status = s0["error"]
+        except (KeyError, TypeError, ValueError):
+            pass
+        return {
+            "status": status,
+            "coin": self._coin(self.market),
+            "fill_price": float(avg_px),
+            "result": result,
+        }
+
     def buy(self, market, amount, price):
         """APRE (o aggiunge a) una posizione LONG.
         Reale: market_open(is_buy=True) dopo set_leverage.
@@ -273,8 +300,9 @@ class Hyperliquid:
             if self.exchange:
                 self._ensure_leverage(coin)
                 result = self.exchange.market_open(name=coin, is_buy=True, sz=sz, slippage=0.005)
-                self.cronoMacdString("BUY reale", coin, sz, result.get("status", "?") if isinstance(result, dict) else result)
-                return result
+                norm = self._normalize_order_result(result, self.price if hasattr(self, "price") else price)
+                self.cronoMacdString("BUY reale", coin, sz, norm.get("status", "?") if norm else "?")
+                return norm
             d = self._load_paper()
             fee = sz * price * config.FEE_PCT
             old_sz = float(d["sz"])
@@ -302,8 +330,9 @@ class Hyperliquid:
         try:
             if self.exchange:
                 result = self.exchange.market_close(coin=coin, sz=sz, slippage=0.005)
-                self.cronoMacdString("SELL reale", coin, sz, result.get("status", "?") if isinstance(result, dict) else result)
-                return result
+                norm = self._normalize_order_result(result, self.price if hasattr(self, "price") else price)
+                self.cronoMacdString("SELL reale", coin, sz, norm.get("status", "?") if norm else "?")
+                return norm
             d = self._load_paper()
             pos = float(d["sz"])
             sz = min(sz, pos)
@@ -327,7 +356,9 @@ class Hyperliquid:
 
     def crea_ordine_sell_stop(self, market, amount, stop_price, limit_price):
         """Trigger sell stop (reduce_only) per chiudere il long se cade.
-        Solo reale (parere paper: solo log)."""
+        isMarket=True: esecuzione garantita appena il trigger viene toccato
+        (accetta eventuale slippage); è più sicuro di un limit su gap veloci.
+        Solo reale (in paper: solo log)."""
         if not self.exchange:
             self.cronoMacdString("PAPER Sell Stop (solo log)", market, amount, stop_price, limit_price)
             return None
@@ -338,10 +369,9 @@ class Hyperliquid:
                 name=coin,
                 is_buy=False,
                 sz=sz,
-                limit_px=float(limit_price),
                 order_type={
                     "trigger": {
-                        "isMarket": False,
+                        "isMarket": True,
                         "triggerPx": str(stop_price),
                         "tpsl": "sl",
                     }
