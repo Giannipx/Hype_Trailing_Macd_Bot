@@ -47,12 +47,31 @@ STOPLOSS=n
 | `REAL` | `n` = paper trading (default) \| `y` = ordini reali |
 | `STOPLOSS` | `y`/`n`: attiva il sell stop loss (trigger HL) dopo ogni buy |
 
-Le altre impostazioni (chiavi API, leva, margine, rete, fee) sono in `config.py`:
+Le altre impostazioni (leva, margine, rete, fee) sono in `config.py`:
 
 - `REAL = "n"` per default; con `REAL = "y"` servono `HL_ACCOUNT_ADDRESS` e `HL_SECRET_KEY`.
-- `NETWORK = "mainnet"` / `"testnet"` — anche in carta i prezzi sono live da mainnet.
+- `NETWORK = "mainnet"` / `"testnet"` — anche in paper i prezzi sono live da mainnet.
 - `LEVERAGE` e `ISOLATED` ("y" = isolato, altrimenti cross) usati solo in reale.
 - `START_BALANCE_USD` e `FEE_PCT` per il wallet simulato.
+
+## Chiavi per il trading reale (.env)
+
+In modalità paper (`REAL=n`) non serve nulla. Per il reale (`REAL=y`) le chiavi
+vanno messe in un file `.env` locale (escluso da git), mai in `config.py`:
+
+```
+cd <cartella del bot>
+copy .env.example .env     # poi editalo con un editor
+```
+
+```
+HL_ACCOUNT_ADDRESS=0x...
+HL_SECRET_KEY=...
+```
+
+`config.py` le legge all'avvio con `python-dotenv` (`load_dotenv()`). Se un
+giorno una chiave finisse per errore in un commit, considerala compromessa:
+resta nella storia di git anche dopo la rimozione.
 
 ## Avvio
 
@@ -60,7 +79,7 @@ Le altre impostazioni (chiavi API, leva, margine, rete, fee) sono in `config.py`
 python jbmainMacd.py --file hype.txt
 ```
 
-Il bot gira in un loop infinito (termina con Ctrl+C). All'avvio chiede se si vuole resettare il wallet paper (`paper_wallet.json`) partendo dai valori di `walletIniziale.txt`; `fileCicloStart.txt` e `cronoMacd.txt` sono file runtime committati (valori solo simulati), mentre `paper_wallet.json` resta gitignored.
+Il bot gira in un loop infinito (termina con Ctrl+C). All'avvio chiede se si vuole resettare il wallet paper (`paper_wallet.json`) partendo dai valori di `walletIniziale.txt`; `fileCicloStart.txt` e `cronoMacd.txt` sono file runtime committati (valori solo simulati), mentre `paper_wallet.json` è gitignored (`gitignore`, de-tracciato da git).
 
 ## Dashboard web (Streamlit)
 
@@ -79,7 +98,7 @@ La dashboard mostra in tempo reale (auto-refresh regolabile nella sidebar):
 ## Come funziona
 
 1. `botMacd.py` calcola MACD/RSI/SMA sull'ultima candela e confronta l'istogramma con quello precedente (diminuzione positiva → vendi, diminuzione negativa → compra), con filtri RSI e wallet.
-2. Al segnale parte `trailMacd.py`: aggiorna lo stop loss seguendo il prezzo finché non viene toccato, poi esegue buy/sell (e piazza un sell stop loss se `STOPLOSS=y`).
+2. Al segnale parte `trailMacd.py`: aggiorna lo stop loss seguendo il prezzo finché non viene toccato, poi esegue buy/sell (e piazza un sell stop loss se `STOPLOSS=y`). In reale lo stop è `isMarket`, quindi esegue anche su movimenti rapidi.
 3. Il prezzo d'acquisto salvato in `fileCicloStart.txt` fa da gate: si vende solo sopra il prezzo medio.
 
 ## Struttura
