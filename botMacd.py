@@ -29,6 +29,7 @@ class CryptoBot:
         self.trailBuy = False
         self.trailSell = False
         self.walletType = "Null"  # Reale o test
+        self.wallet_binance.reset_balance()  # ripristina il balance all'avvio
         self.wallet()
 
     # BANNER*********************************************
@@ -55,6 +56,10 @@ class CryptoBot:
         print("Leva:              %gx (%s)" % (config.LEVERAGE, "isolated" if config.ISOLATED == "y" else "cross"))
         print("Fee (simulata):    %.3f%%" % (config.FEE_PCT * 100))
         print("Capitale Paper:    $%.2f" % config.START_BALANCE_USD)
+        print("  Wallet iniziale (%s):" % "walletIniziale.txt")
+        for tok, val in self.wallet_binance.read_wallet_iniziale().items():
+            print("    %s: %s" % (tok, val))
+        print("  Balance (%s): %s" % ("fileBalance.txt", self.wallet_binance.balance_string()))
         print("=" * 55)
         if self.real == "y":
             print("      Modalità REALE attiva: ordini veri su Hyperliquid %s - verifica chiavi e bilanci in config.py" % rete)
@@ -124,7 +129,8 @@ class CryptoBot:
 
             print(f"Last price: {self.price} - Prezzo Minimo: {self.priceMin} ")
 
-            print(f"  {self.walletType} Wallet {self.stableName}: {self.stableCoin} - {self.cryptoName}: {self.cryptoCoin}")
+            print(f"  {self.walletType} Wallet {self.stableName}: {self.stableCoin:.3f} - {self.cryptoName}: {self.cryptoCoin:.4f}")
+            print("  " + self.wallet_binance.balance_string())
             print(f"  Bot Wallet {self.stableName}: {self.stableBot} - {self.cryptoName}: {self.coinBot} [{self.cryptoCoinOrder}]")
 
             print(f"BUY: {self.trailBuy} - SELL: {self.trailSell}")
