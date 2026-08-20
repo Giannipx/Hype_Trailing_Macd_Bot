@@ -31,7 +31,41 @@ class CryptoBot:
         self.walletType = "Null"  # Reale o test
         self.wallet()
 
+    # BANNER*********************************************
+    def print_banner(self):
+        rete = "MAINNET" if config.NETWORK == "mainnet" else "TESTNET"
+        print("=" * 55)
+        print("HYPE TRAILING MACD BOT - Hyperliquid")
+        print("=" * 55)
+        if self.real == "y":
+            print("Modalità:          ORDINI REALI (ordini veri su %s)" % rete)
+        else:
+            print("Modalità:          PAPER TRADING (dati reali %s, ordini simulati)" % rete)
+        print("-" * 55)
+        print("PARAMETRI STRATEGIA")
+        print("Coin:              %s" % self.market)
+        print("Timeframe:         %s" % self.timeframe)
+        print("Trail Stop Size:   $%.2f" % self.stopSize)
+        print("Sell Stop Trigger: $%.2f sotto il prezzo (stopz x %gx)" % (self.stopSize * self.multiSize, self.multiSize))
+        print("Intervallo Trail:  %gs" % self.interval)
+        print("Invest. Stable:    %.0f%% per buy" % (self.percStable * 100))
+        print("Vendita Coin:      %.0f%% per sell" % (self.percCoin * 100))
+        print("StopLoss Ordine:   %s" % ("attivo" if self.stoplossorder == "y" else "non attivo"))
+        print("Filtro RSI:        buy < 60 | sell > 40")
+        print("Leva:              %gx (%s)" % (config.LEVERAGE, "isolated" if config.ISOLATED == "y" else "cross"))
+        print("Fee (simulata):    %.3f%%" % (config.FEE_PCT * 100))
+        print("Capitale Paper:    $%.2f" % config.START_BALANCE_USD)
+        print("=" * 55)
+        if self.real == "y":
+            print("      Modalità REALE attiva: ordini veri su Hyperliquid %s - verifica chiavi e bilanci in config.py" % rete)
+            print("   [REALE] Saldo conto (USDC): %.2f$" % self.stableCoin)
+        else:
+            print("      Modalità PAPER TRADING attiva: dati reali da %s, nessun ordine reale, nessuna chiave privata richiesta" % rete)
+            print("   [PAPER] Saldo simulato: %.2f$" % self.stableCoin)
+        print("")
+
     def run(self):
+        self.print_banner()
         while True:
             now = datetime.datetime.now()
 
