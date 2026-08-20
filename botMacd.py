@@ -177,7 +177,7 @@ class CryptoBot:
 
             print(f"Last price: {self.price} - Prezzo Minimo: {self.priceMin} ")
 
-            print(f"  {self.walletType} Wallet {self.stableName}: {self.stableCoin:.3f} - {self.cryptoName}: {self.cryptoCoin:.4f}")
+            print(f"  {self.walletType} Wallet {self.stableName}: {self.stableCoin} - {self.cryptoName}: {self.cryptoCoin} [{self.cryptoCoinOrder}]")
             pw = self.wallet_binance.paper_wallet_dump()
             print(f"  Paper wallet: entry {pw['entry_px']:.3f} | PnL {pw['realized_pnl_usd']:.2f} | fee {pw['fees_usd']:.2f} | trade {pw['n_trades']}")
             print(f"  Bot Wallet {self.stableName}: {self.stableBot} - {self.cryptoName}: {self.coinBot} [{self.cryptoCoinOrder}]")

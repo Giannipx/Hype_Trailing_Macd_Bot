@@ -152,11 +152,9 @@ class StopTrail:
         print("Diff: %.3f" % (self.stoploss - self.price))
         print("  Prezzo Minimo: %.3f" % self.priceMin)
         print("****** Wallet " + self.walletType)
-        print(str(self.stableName) + ": %.2f" % self.stableCoin)
-        print(str(self.cryptoName) + ": %.3f" % self.cryptoCoin + "[%.3f" % self.cryptoCoinOrder + "]")
+        print(f"{self.stableName}: {self.stableCoin} - {self.cryptoName}: {self.cryptoCoin} [{self.cryptoCoinOrder}]")
         print("wallet bot-----")
-        print(str(self.stableName) + ": %.2f" % self.stableBot)
-        print(str(self.cryptoName) + ": %.4f" % self.coinBot)
+        print(f"{self.stableName}: {self.stableBot} - {self.cryptoName}: {self.coinBot}")
         print("---------------------")
 
     # RUN*******************************************
