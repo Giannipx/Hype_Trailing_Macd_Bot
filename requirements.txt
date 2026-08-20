@@ -1,2 +1,5 @@
 hyperliquid-python-sdk
 eth-account
+
+# dashboard web opzionale (streamlit run dashboard.py)
+streamlit

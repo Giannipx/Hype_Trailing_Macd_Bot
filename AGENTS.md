@@ -35,3 +35,4 @@ python jbmainMacd.py --file hype.txt
 - `indicators.py` — pure-Python MACD/RSI/SMA (no pandas/ta).
 - `config.py` — all trading/config knobs.
 - `hl.py` — single wrapper around Hyperliquid (balance, candles, orders, logging).
+- `dashboard.py` — optional Streamlit dashboard: `streamlit run dashboard.py -- --file hype.txt` (needs `streamlit`, added in `requirements.txt`); reads the same runtime files and live Hyperliquid data.

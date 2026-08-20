@@ -62,6 +62,20 @@ python jbmainMacd.py --file hype.txt
 
 Il bot gira in un loop infinito (termina con Ctrl+C). Il balance paper (`fileBalance.txt`) viene ripristinato a ogni avvio dai valori di `walletIniziale.txt`; `fileCicloStart.txt` e `cronoMacd.txt` sono file runtime committati (valori solo simulati), mentre `paper_wallet.json` resta gitignored.
 
+## Dashboard web (Streamlit)
+
+```
+pip install -r requirements.txt   # include streamlit
+streamlit run dashboard.py -- --file hype.txt
+```
+
+La dashboard mostra in tempo reale (auto-refresh regolabile nella sidebar):
+
+- Parametri strategia e configurazione (`hype.txt` + `config.py`);
+- Saldi e wallet: `fileBalance.txt`, `walletIniziale.txt`, dettagli `paper_wallet.json` e valore USD di ogni token a prezzo live;
+- Prezzo, candele, indicatori (MACD/Signal/Histogram, RSI, SMA20/50);
+- Log attività (`cronoMacd.txt`) con filtro libero.
+
 ## Come funziona
 
 1. `botMacd.py` calcola MACD/RSI/SMA sull'ultima candela e confronta l'istogramma con quello precedente (diminuzione positiva → vendi, diminuzione negativa → compra), con filtri RSI e wallet.
@@ -76,6 +90,7 @@ Il bot gira in un loop infinito (termina con Ctrl+C). Il balance paper (`fileBal
 - `indicators.py` — MACD/RSI/SMA in Python puro.
 - `config.py` — tutte le impostazioni di trading.
 - `hl.py` — unico wrapper per Hyperliquid (saldi, candele, ordini, log).
+- `dashboard.py` — dashboard web Streamlit (parametri, saldi, indicatori, log).
 
 ## Avvertenze
 
