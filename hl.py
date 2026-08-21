@@ -20,7 +20,7 @@ Attenzione (perp):
 """
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import eth_account
@@ -72,10 +72,16 @@ class Hyperliquid:
         return sz
 
     def usd_to_size(self, coin, usd, price):
-        """Size (roundata allo szDecimals) per un importo usd, tolta la fee."""
-        if price <= 0:
+        """Size (roundata allo szDecimals) per un importo usd.
+
+        FIX: prima si toglieva la fee qui (* (1 - FEE_PCT)) E DI NUOVO in
+        buy() (fee = sz*price*FEE_PCT sottratta dal cash) — fee sottratta
+        due volte sullo stesso trade. La fee va applicata una sola volta,
+        qui sotto in buy()/sell(), non nel dimensionamento della size.
+        """
+        if price <= 0 or usd <= 0:
             return 0.0
-        sz = (usd / price) * (1 - config.FEE_PCT)
+        sz = usd / price
         return self.round_size(coin, sz)
 
     # ---- prezzo e candele ----
@@ -86,16 +92,33 @@ class Hyperliquid:
             raise ValueError(f"coin {coin} non presente in all_mids()")
         return float(mids[coin])
 
-    def ohlcv_data(self, market, timeframe, limit):
-        """Ritorna lista [timestamp_ms, open, high, low, close, volume]."""
+    def ohlcv_data(self, market, timeframe, limit, closed_only=True):
+        """Ritorna lista [timestamp_ms, open, high, low, close, volume].
+
+        FIX: prima si passava endTime=now_ms senza verificare se l'ultima
+        candela restituita fosse già chiusa. Con un timeframe di 15m, a metà
+        intervallo (es. 18:07 su una candela 18:00-18:15) l'ultima candela è
+        ancora in formazione: MACD/RSI/SMA calcolati su di essa cambiano ad
+        ogni ciclo e il comportamento live non è più equivalente a un
+        eventuale backtest futuro sugli stessi dati storici (che vedrebbe
+        solo candele chiuse). closed_only=True (default) scarta l'ultima
+        candela se il suo "T" (close time) è ancora nel futuro rispetto ad
+        ora; per compensare si richiede una candela in più (fetch_limit).
+        """
         interval = self._map_interval(timeframe)
         seconds = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
                    "1h": 3600, "2h": 7200, "4h": 14400}.get(interval, 60)
-        now_ms = int(datetime.now().timestamp() * 1000)
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        fetch_limit = limit + 1 if closed_only else limit
         res = self.info.candles_snapshot(
             self._coin(market), interval,
-            startTime=now_ms - limit * seconds * 1000, endTime=now_ms,
+            startTime=now_ms - fetch_limit * seconds * 1000, endTime=now_ms,
         )
+        if closed_only and res:
+            close_time = int(res[-1].get("T", 0))
+            if close_time == 0 or close_time > now_ms:
+                res = res[:-1]
+        res = res[-limit:] if limit else res
         out = []
         for c in res:
             out.append([
@@ -148,6 +171,34 @@ class Hyperliquid:
     def get_balance_order(self, coin):
         """Cripto bloccata dagli ordini aperti. I trigger SL non bloccano la
         posizione su HL: perciò 0 (paper e reale)."""
+        return 0.0
+
+    def get_entry_price(self, market):
+        """Prezzo medio di ingresso della posizione corrente.
+
+        FIX: prima il gate "vendo solo sopra il prezzo d'acquisto" leggeva
+        fileCicloStart.txt, valorizzato con `priceMin = self.price` (il
+        prezzo dell'ULTIMA singola buy), mentre il wallet paper calcola
+        correttamente una media ponderata (entry_px) quando si aggiunge a
+        una posizione esistente. Le due grandezze potevano divergere dopo
+        più buy consecutive (es. 10@70 poi 10@60: entry_px=65, ma
+        fileCicloStart.txt restava 60). get_entry_price() diventa la fonte
+        unica di verità: PAPER legge entry_px dal wallet simulato, REALE
+        legge entryPx della posizione da Hyperliquid.
+        """
+        coin = self._coin(market)
+        if not self.exchange:
+            d = self._load_paper()
+            return float(d.get("entry_px", 0.0))
+        address = self.account_address or self.exchange.wallet.address
+        try:
+            state = self.info.user_state(address)
+            for ap in state.get("assetPositions", []):
+                pos = ap.get("position", {})
+                if pos.get("coin") == coin:
+                    return float(pos.get("entryPx", 0.0) or 0.0)
+        except Exception:
+            pass
         return 0.0
 
     # ---- wallet paper (perp: cash USDC + posizione szi) ----
@@ -265,26 +316,49 @@ class Hyperliquid:
 
     def _normalize_order_result(self, result, fallback_price):
         """Uniforma la risposta dell'SDK (reale) in un dict con la stessa
-        forma del ramo paper. Il prezzo di fill (avgPx) viene estratto dagli
-        statuses della risposta market_open/market_close: altrimenti si usa
-        il prezzo passato in chiamata. Ritorna dict o None se l'ordine è
-        stato rifiutato."""
+        forma del ramo paper.
+
+        FIX: la versione precedente ritornava SEMPRE un dict con
+        "fill_price" valorizzato (sul fallback se non trovava avgPx),
+        ritornando None solo se `result` non era un dict. Un ordine
+        rifiutato da Hyperliquid arriva comunque come dict (con uno stato
+        di errore dentro agli statuses), quindi veniva trattato come
+        eseguito dal chiamante (trailMacd.py faceva
+        `res.get("fill_price", self.price)` e proseguiva scrivendo
+        wallet/ciclostart/log come se il trade fosse andato a buon fine).
+        Ora si espone esplicitamente "filled": True/False e "error": il
+        chiamante DEVE controllare "filled" prima di considerare
+        l'operazione eseguita."""
         if not isinstance(result, dict):
-            return None
+            return {"status": "error", "filled": False, "error": "risposta ordine non valida (non-dict)",
+                    "coin": self._coin(self.market), "fill_price": fallback_price, "result": result}
         status = result.get("status")
         avg_px = fallback_price
+        filled = False
+        err_msg = None
         try:
             statuses = result["response"]["data"]["statuses"]
             if statuses and isinstance(statuses[0], dict):
                 s0 = statuses[0]
                 if "filled" in s0:
                     avg_px = float(s0["filled"].get("avgPx", fallback_price))
-                elif "resting" not in s0 and "error" in s0:
-                    status = s0["error"]
-        except (KeyError, TypeError, ValueError):
-            pass
+                    filled = True
+                elif "resting" in s0:
+                    # un market order che finisce "resting" invece di essere
+                    # eseguito subito non va considerato un fill.
+                    err_msg = "ordine resting, non eseguito immediatamente"
+                elif "error" in s0:
+                    err_msg = str(s0["error"])
+            else:
+                err_msg = "risposta ordine priva di statuses"
+        except (KeyError, TypeError, ValueError, IndexError) as e:
+            err_msg = f"risposta ordine non riconosciuta ({e})"
+        if status != "ok" and err_msg is None:
+            err_msg = f"status={status}"
         return {
             "status": status,
+            "filled": filled,
+            "error": err_msg,
             "coin": self._coin(self.market),
             "fill_price": float(avg_px),
             "result": result,
@@ -301,7 +375,8 @@ class Hyperliquid:
                 self._ensure_leverage(coin)
                 result = self.exchange.market_open(name=coin, is_buy=True, sz=sz, slippage=0.005)
                 norm = self._normalize_order_result(result, self.price if hasattr(self, "price") else price)
-                self.cronoMacdString("BUY reale", coin, sz, norm.get("status", "?") if norm else "?")
+                esito = "FILLED" if norm["filled"] else f"NON ESEGUITO ({norm.get('error')})"
+                self.cronoMacdString("BUY reale", coin, sz, norm.get("status", "?"), esito)
                 return norm
             d = self._load_paper()
             fee = sz * price * config.FEE_PCT
@@ -316,10 +391,14 @@ class Hyperliquid:
             d["fees_usd"] = float(d["fees_usd"]) + fee
             self._save_paper(d)
             self.cronoMacdString("PAPER BUY", coin, "sz", sz, "@", price, "fee", round(fee, 4))
-            return {"paper": True, "coin": coin, "sz": sz, "fill_price": price, "fee": fee}
+            # FIX: "filled": True esplicito anche sul ramo paper, cosi'
+            # trailMacd.py controlla lo stesso campo indipendentemente da
+            # paper/reale invece di assumere sempre l'esecuzione.
+            return {"paper": True, "filled": True, "error": None, "coin": coin, "sz": sz, "fill_price": price, "fee": fee}
         except Exception as e:
             print("Errore BUY Hyperliquid:", e)
-            return None
+            self.cronoMacdString("BUY ERRORE", coin, str(e))
+            return {"filled": False, "status": "error", "error": str(e), "fill_price": price}
 
     def sell(self, market, amount, price):
         """CHIUDE la posizione long per l'ammontare richiesto.
@@ -331,7 +410,8 @@ class Hyperliquid:
             if self.exchange:
                 result = self.exchange.market_close(coin=coin, sz=sz, slippage=0.005)
                 norm = self._normalize_order_result(result, self.price if hasattr(self, "price") else price)
-                self.cronoMacdString("SELL reale", coin, sz, norm.get("status", "?") if norm else "?")
+                esito = "FILLED" if norm["filled"] else f"NON ESEGUITO ({norm.get('error')})"
+                self.cronoMacdString("SELL reale", coin, sz, norm.get("status", "?"), esito)
                 return norm
             d = self._load_paper()
             pos = float(d["sz"])
@@ -349,10 +429,11 @@ class Hyperliquid:
             self._save_paper(d)
             self.cronoMacdString("PAPER SELL", coin, "sz", sz, "@", price,
                                  "pnl", round(realized, 4), "fee", round(fee, 4))
-            return {"paper": True, "coin": coin, "sz": sz, "fill_price": price, "fee": fee, "pnl": realized}
+            return {"paper": True, "filled": True, "error": None, "coin": coin, "sz": sz, "fill_price": price, "fee": fee, "pnl": realized}
         except Exception as e:
             print("Errore SELL Hyperliquid:", e)
-            return None
+            self.cronoMacdString("SELL ERRORE", coin, str(e))
+            return {"filled": False, "status": "error", "error": str(e), "fill_price": price}
 
     def crea_ordine_sell_stop(self, market, amount, stop_price, limit_price):
         """Trigger sell stop (reduce_only) per chiudere il long se cade.
@@ -437,9 +518,13 @@ class Hyperliquid:
     def cronoMacdString(self, *args):
         try:
             with open(config.CRONO_FILE, "a") as f:
-                now = datetime.now()
-                f.write("--> " + now.strftime("%Y-%m-%d %H:%M:%S") + " ")
-                print_str = now.strftime("%Y-%m-%d %H:%M:%S") + " "
+                # FIX: prima datetime.now() (ora locale del sistema, naive),
+                # mentre le candele Hyperliquid sono in epoch ms UTC. Log
+                # disallineati rispetto ai dati OHLCV rendono più difficile
+                # il confronto futuro live/backtest.
+                now = datetime.now(timezone.utc)
+                f.write("--> " + now.strftime("%Y-%m-%d %H:%M:%S UTC") + " ")
+                print_str = now.strftime("%Y-%m-%d %H:%M:%S UTC") + " "
                 for arg in args:
                     f.write(str(arg) + "|")
                     print_str += str(arg) + "|"

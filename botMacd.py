@@ -87,7 +87,10 @@ class CryptoBot:
     def run(self):
         self.print_banner()
         while True:
-            now = datetime.datetime.now()
+            # FIX: prima datetime.datetime.now() (locale, naive). Le candele
+            # Hyperliquid sono UTC: uniformo per coerenza nei log e in vista
+            # di un backtest futuro sugli stessi dati.
+            now = datetime.datetime.now(datetime.timezone.utc)
 
             # scelgo il timeframe da 1 minuto o da 1 ora
             if self.timeframe == "1m":
@@ -113,7 +116,7 @@ class CryptoBot:
                 # se si verifica un sell stop loss bisogna eliminare l'ordine dal file
                 self.wallet_binance.verifica_ordini(self.market)
 
-            now = datetime.datetime.now().replace(microsecond=0)
+            now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
 
             # FIX: qualsiasi errore di rete/API qui non deve far morire il bot.
             # Prima erano chiamate "nude": un timeout di Hyperliquid o dati
@@ -142,10 +145,18 @@ class CryptoBot:
                     self.data_binance.cronoMacdString("SKIP ciclo: indicatori non calcolabili (dati insufficienti)")
                     continue
 
-                self.last_macd = round(macd_line[-1], 5)
-                self.last_signal = round(signal_line[-1], 5)
-                self.last_histogram = round(histogram[-1], 5)
-                self.last_rsi = round(rsi_values, 2)
+                # FIX: prima si arrotondava a 5 decimali (macd/signal/hist) e
+                # 2 decimali (rsi) PRIMA di usarli nei confronti decisionali
+                # (last_macd > last_signal, last_histogram > previous_histogram,
+                # last_rsi > 40/60). Su variazioni submillesimali dell'istogramma
+                # l'arrotondamento può nascondere un vero aumento/diminuzione o
+                # spostare artificialmente una soglia RSI vicina a 40/60. I
+                # valori interni ora restano a piena precisione; l'arrotondamento
+                # si applica solo in stampa/log (vedi sotto).
+                self.last_macd = macd_line[-1]
+                self.last_signal = signal_line[-1]
+                self.last_histogram = histogram[-1]
+                self.last_rsi = rsi_values
                 self.sma1 = round(sma1, 2)
                 self.sma2 = round(sma2, 2)
 
@@ -162,8 +173,8 @@ class CryptoBot:
 
             self.data_binance.cronoMacdString(
                 f"TRAIL MULTIPLER x{self.multiSize} | Price: {self.price} | "
-                f"MACD: {self.last_macd} | Signal: {self.last_signal} | Histo: {self.last_histogram} | "
-                f"RSI: {self.last_rsi} | SMA20: {self.sma1} | SMA50: {self.sma2} | "
+                f"MACD: {self.last_macd:.5f} | Signal: {self.last_signal:.5f} | Histo: {self.last_histogram:.5f} | "
+                f"RSI: {self.last_rsi:.2f} | SMA20: {self.sma1} | SMA50: {self.sma2} | "
                 f"{self.stableName}: {self.stableCoin:.2f} | {self.cryptoName}: {self.cryptoCoin:.4f} | "
                 f"trailBuy: {self.trailBuy} | trailSell: {self.trailSell}")
 
@@ -172,8 +183,9 @@ class CryptoBot:
             print(f"Timeframe: [{self.timeframe}]")
             print("UTC:", now)
 
-            print(f"  HISTOGRAM: {self.last_histogram} ({self.previous_histogram}) - MACD: {self.last_macd} - SIGNAL: {self.last_signal} ")
-            print(f"  RSI ({self.rsi_period} periodi): {self.last_rsi} update 40/60 - SMA20: {self.sma1}  - SMA50: {self.sma2}")
+            prev_h = f"{self.previous_histogram:.5f}" if self.previous_histogram is not None else "None"
+            print(f"  HISTOGRAM: {self.last_histogram:.5f} ({prev_h}) - MACD: {self.last_macd:.5f} - SIGNAL: {self.last_signal:.5f} ")
+            print(f"  RSI ({self.rsi_period} periodi): {self.last_rsi:.2f} update 40/60 - SMA20: {self.sma1}  - SMA50: {self.sma2}")
 
             print(f"Last price: {self.price} - Prezzo Minimo: {self.priceMin} ")
 
@@ -188,7 +200,10 @@ class CryptoBot:
 
             # aumento positivo - no SELL****************************************************
             if self.previous_histogram is not None:
-                diff = round((self.last_histogram - self.previous_histogram), 2)
+                # "diff" è solo per il print (le decisioni sotto confrontano
+                # direttamente self.last_histogram/previous_histogram a
+                # piena precisione, non su questo valore arrotondato).
+                diff = round((self.last_histogram - self.previous_histogram), 5)
 
                 if self.last_macd > self.last_signal and self.last_histogram > self.previous_histogram:
                     trend = 'MACD: Aumento positivo'
@@ -281,7 +296,12 @@ class CryptoBot:
         self.stableBot = round(self.stableCoin * self.percStable, 2)
         self.coinBot = round(self.cryptoCoin * self.percCoin, 2)
 
-        self.priceMin = self.wallet_binance.read_ciclostart(0)
+        # FIX: prima si leggeva fileCicloStart.txt (valorizzato con l'ultimo
+        # singolo prezzo di buy), che poteva divergere dalla media ponderata
+        # reale della posizione dopo più buy consecutive. get_entry_price()
+        # è ora la fonte unica di verità (paper: entry_px dal wallet
+        # simulato: reale: entryPx della posizione Hyperliquid).
+        self.priceMin = self.wallet_binance.get_entry_price(self.market)
 
         # verifico i cicli
         if self.price > self.priceMin and self.cryptoCoin > 0:

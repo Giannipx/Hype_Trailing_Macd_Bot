@@ -1,5 +1,5 @@
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from hl import Hyperliquid
 
@@ -62,7 +62,6 @@ class StopTrail:
 
                     self.wallet()
                     coinSell = self.coinBot
-                    priceMin = 0
 
                     print("++++++++++++++++++++++++++++++++++++++++++")
                     print("Selling | Amount: %.2f | Price: %.2f" % (coinSell, self.price))
@@ -73,24 +72,42 @@ class StopTrail:
                     else:
                         res = self.wallet_binance.sell(self.market, coinSell, self.price)
 
-                    # FIX: l'ordine è già stato eseguito: il trail va chiuso PRIMA
-                    # delle scritture su file (write_ciclostart/log). Se una di
-                    # queste fallisse, il try/except di run() non deve far
-                    # ripartire il loop e rieseguire la stessa vendita (ordine
-                    # duplicato / market_close ripetuto all'infinito).
+                    # FIX: prima si assumeva sempre l'esecuzione (res poteva
+                    # essere un dict con status di errore e veniva comunque
+                    # trattato come fill). Ora si controlla esplicitamente
+                    # "filled": se l'ordine è stato rifiutato/non eseguito, il
+                    # trail NON si chiude (self.running resta True) e riprova
+                    # al prossimo intervallo, senza toccare wallet/ciclostart/log
+                    # come se la vendita fosse andata a buon fine.
+                    if not isinstance(res, dict) or not res.get("filled"):
+                        err = res.get("error") if isinstance(res, dict) else "risposta ordine assente"
+                        print(f"SELL NON ESEGUITO: {err}")
+                        self.wallet_binance.cronoMacdString(f"SELL NON ESEGUITO: {err}")
+                        return
+
+                    # FIX: prima si usava self.price (mid corrente) per log/pnl
+                    # invece del prezzo di fill reale restituito dall'ordine —
+                    # stessa correzione già fatta sul ramo BUY.
+                    fill_price = res.get("fill_price", self.price)
+
                     self.running = False
 
                     self.wallet()  # aggiorna i saldi dopo la vendita
-                    fee_t = res.get("fee", 0.0) if isinstance(res, dict) else 0.0
-                    pnl_t = res.get("pnl", 0.0) if isinstance(res, dict) else 0.0
-                    self.data_binance.cronoMacdString("SELL | Price: %.3f | Stop loss: %.3f | pnl: %.2f | fee: %.4f | USDC: %.2f | %s: %.4f"
-                                                      % (self.price, self.stoploss, pnl_t, fee_t, self.stableCoin, self.cryptoName, self.cryptoCoin))
-                    self.data_binance.cronoMacdString("pricemin : %.3f" % priceMin)
+                    fee_t = res.get("fee", 0.0)
+                    pnl_t = res.get("pnl", 0.0)
+                    self.data_binance.cronoMacdString("SELL | Fill: %.3f | Stop loss: %.3f | pnl: %.2f | fee: %.4f | USDC: %.2f | %s: %.4f"
+                                                      % (fill_price, self.stoploss, pnl_t, fee_t, self.stableCoin, self.cryptoName, self.cryptoCoin))
 
-                    self.wallet_binance.write_ciclostart(priceMin)  # vendo
+                    # FIX: priceMin non più forzato a 0 qui, ma sincronizzato
+                    # con get_entry_price() (0.0 per una posizione chiusa,
+                    # coerente con self.wallet() dopo la vendita). Il valore
+                    # scritto in fileCicloStart.txt resta solo per compatibilità
+                    # con la dashboard: la fonte di verità ora è get_entry_price().
+                    self.wallet_binance.write_ciclostart(self.priceMin)
+                    self.data_binance.cronoMacdString("pricemin : %.3f" % self.priceMin)
 
-                    now = datetime.now()
-                    self.data_binance.cronoTradeMacd(now, "SELL", self.market, coinSell, self.price)
+                    now = datetime.now(timezone.utc)
+                    self.data_binance.cronoTradeMacd(now, "SELL", self.market, coinSell, fill_price)
 
                     print("Torno a MACD")
 
@@ -109,8 +126,7 @@ class StopTrail:
             elif self.price >= self.stoploss:
                 self.wallet()
                 stableBuy = self.stableBot
-                amount = self.wallet_binance.usd_to_size(self.market, stableBuy, self.price)  # size perp (szDecimals, fee inclusa)
-                priceMin = self.price
+                amount = self.wallet_binance.usd_to_size(self.market, stableBuy, self.price)  # size perp (szDecimals)
                 if self.stoplossorder == "y":
                     self.sellOrderStopLoss = True  # ordine prevenzione stop loss
 
@@ -122,6 +138,16 @@ class StopTrail:
                 else:
                     res = self.wallet_binance.buy(self.market, amount, self.price)
 
+                # FIX: come nel ramo sell, controllo esplicito di "filled"
+                # prima di considerare l'ordine eseguito. Un ordine
+                # rifiutato/errore non deve chiudere il trail né scrivere
+                # wallet/ciclostart/log come se l'acquisto fosse riuscito.
+                if not isinstance(res, dict) or not res.get("filled"):
+                    err = res.get("error") if isinstance(res, dict) else "risposta ordine assente"
+                    print(f"BUY NON ESEGUITO: {err}")
+                    self.wallet_binance.cronoMacdString(f"BUY NON ESEGUITO: {err}")
+                    return
+
                 # FIX: prima si richiamava self.wallet() (che rifetcha il prezzo
                 # live) e SOLO DOPO si calcolava triggerPrice usando il NUOVO
                 # self.price - disallineato dal prezzo a cui l'ordine è stato
@@ -129,14 +155,11 @@ class StopTrail:
                 # lo si usa per lo stop-loss e per i log, così restano coerenti
                 # con l'esecuzione reale anche se il mercato si è mosso nel
                 # frattempo.
-                fill_price = res.get("fill_price", self.price) if isinstance(res, dict) else self.price
+                fill_price = res.get("fill_price", self.price)
 
-                # FIX: stessa regola del ramo sell: l'ordine è già eseguito,
-                # chiudo il trail PRIMA delle scritture file per non ri-eseguire
-                # il buy se write_ciclostart/log fallissero.
                 self.running = False
 
-                self.wallet()  # aggiorna i saldi dopo l'acquisto
+                self.wallet()  # aggiorna i saldi (e priceMin via get_entry_price)
 
                 # Piazzo un ordine Sell Stop Loss (trigger HL, reduce_only,
                 # isMarket=True: esegue anche su gap veloci)
@@ -145,14 +168,19 @@ class StopTrail:
                 if self.stoplossorder == "y":
                     self.wallet_binance.crea_ordine_sell_stop(self.market, amountOrder, triggerPrice, triggerPrice)
                     self.wallet_binance.cronoMacdString("Creo Ordine Sell Stop", self.market, amountOrder, triggerPrice, triggerPrice)
-                fee_t = res.get("fee", 0.0) if isinstance(res, dict) else 0.0
+                fee_t = res.get("fee", 0.0)
                 self.wallet_binance.cronoMacdString("BUY | Fill: %.3f | Stop loss: %.3f | fee: %.4f | USDC: %.2f | %s: %.4f"
                                                     % (fill_price, self.stoploss, fee_t, self.stableCoin, self.cryptoName, self.cryptoCoin))
-                self.wallet_binance.cronoMacdString("pricemin : %.3f" % priceMin)
 
-                self.wallet_binance.write_ciclostart(priceMin)  # compro
+                # FIX: priceMin locale (= self.price pre-fill) sostituito da
+                # self.priceMin, ora popolato da get_entry_price() (media
+                # ponderata reale/paper) dal self.wallet() qui sopra. Il file
+                # fileCicloStart.txt resta scritto solo per compatibilità
+                # dashboard, non è più la fonte di verità del gate di vendita.
+                self.wallet_binance.write_ciclostart(self.priceMin)
+                self.wallet_binance.cronoMacdString("pricemin : %.3f" % self.priceMin)
 
-                now = datetime.now()
+                now = datetime.now(timezone.utc)
                 self.wallet_binance.cronoTradeMacd(now, "BUY", self.market, amount, fill_price)
 
                 print("Torno a MACD")
@@ -216,4 +244,6 @@ class StopTrail:
         self.stableBot = round(self.stableCoin * self.percStable, 2)
         self.coinBot = round(self.cryptoCoin * self.percCoin, 2)
 
-        self.priceMin = self.wallet_binance.read_ciclostart(0)
+        # FIX: stessa correzione di botMacd.py — get_entry_price() invece di
+        # fileCicloStart.txt come fonte del prezzo medio d'ingresso.
+        self.priceMin = self.wallet_binance.get_entry_price(self.market)

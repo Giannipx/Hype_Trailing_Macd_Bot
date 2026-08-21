@@ -224,16 +224,159 @@ quello pre-fix (il bug di §1.4 si ripresenterebbe solo in modalità reale).
 
 ---
 
-## 4. Riepilogo priorità
+## 5. Secondo giro di fix — valutazione proposte di un agente esterno (GPT)
+
+Giovanni ha fatto analizzare il progetto (post-fix del §1) a un agente esterno,
+che ha prodotto una nuova lista di bug/miglioramenti. Ogni punto è stato
+verificato riga per riga sul codice HEAD attuale (non sulle citazioni del
+documento esterno, alcune riferite a un commit precedente) prima di essere
+applicato o scartato.
+
+### 5.1 — Punti dell'analisi esterna rivelatisi GIÀ RISOLTI (falsi sul codice attuale)
+
+- **"Istanze Hyperliquid condivise non usate"**: falso. `botMacd.py` passa
+  `self.wallet_binance, self.data_binance` a `StopTrail` **posizionalmente**
+  (non come keyword `wallet_instance=...`), per questo l'agente esterno
+  (basato su pattern-matching testuale) non le ha riconosciute, ma
+  funzionalmente l'istanza viene già riusata dal fix del §1.
+- **"`cryptoCoin > 1` ancora presente"**: falso, già corretto nel §1.3 in
+  `(self.cryptoCoin * self.price) > 10`.
+- **"Nessuna validazione dati OHLCV insufficienti"**: falso, già corretto nel
+  §1.1.
+
+Di conseguenza 3 delle "5 priorità assolute" indicate dall'analisi esterna
+erano già chiuse prima di iniziare questo secondo giro.
+
+### 5.2 — Fix applicati in questo giro (confermati veri sul codice attuale)
+
+**Candela ancora in formazione inclusa nel calcolo indicatori**
+File: `hl.py`, `ohlcv_data()`. Prima si passava `endTime=now_ms` senza
+verificare se l'ultima candela restituita fosse già chiusa: con un
+timeframe 15m, a metà intervallo l'ultima candela nell'array è ancora in
+formazione, e MACD/RSI/SMA la includevano nel calcolo — comportamento che
+cambia ad ogni ciclo e non è riproducibile in un backtest futuro (che vedrà
+solo candele chiuse). Fix: nuovo parametro `closed_only=True` (default) che
+scarta l'ultima candela se il suo `T` (close time) è ancora nel futuro
+rispetto ad `now`, richiedendo una candela in più per compensare.
+
+**Fee sottratta due volte sullo stesso trade**
+File: `hl.py`, `usd_to_size()`. Calcolava `sz = (usd/price) * (1-FEE_PCT)`
+e poi `buy()` sottraeva di nuovo `fee = sz*price*FEE_PCT` dal cash. Fix:
+`usd_to_size()` non applica più la fee; viene applicata una sola volta in
+`buy()`/`sell()`.
+
+**Ordine rifiutato/non eseguito trattato come eseguito**
+File: `hl.py` (`_normalize_order_result()`, `buy()`, `sell()`),
+`trailMacd.py` (rami BUY e SELL). `_normalize_order_result()` ritornava
+sempre un dict con `fill_price` valorizzato (sul fallback se non trovava
+`avgPx`), e ritornava `None` solo se la risposta non era un dict — un
+ordine rifiutato da Hyperliquid arriva comunque come dict, quindi veniva
+considerato un fill. Fix: la funzione espone ora esplicitamente `"filled":
+True/False` e `"error"`; sia il ramo reale che quello paper di `buy()`/
+`sell()` restituiscono questo campo; `trailMacd.py` controlla `filled`
+prima di chiudere il trail, scrivere `fileCicloStart.txt` o loggare il
+trade — se l'ordine non è eseguito, il trail resta attivo e riprova al
+prossimo intervallo.
+
+**`priceMin` (fileCicloStart.txt) disallineato dalla media ponderata reale**
+File: `hl.py` (nuova funzione `get_entry_price()`), `botMacd.py`,
+`trailMacd.py`. Il gate "vendo solo sopra il prezzo d'acquisto" leggeva
+`fileCicloStart.txt`, valorizzato con l'ultimo singolo prezzo di buy
+(`priceMin = self.price`), mentre il wallet paper calcola correttamente una
+media ponderata (`entry_px`) quando si aggiunge a una posizione esistente.
+Dopo più buy consecutive le due grandezze potevano divergere (es. 10@70 poi
+10@60: entry reale 65, ma fileCicloStart.txt restava 60). Fix:
+`get_entry_price()` è ora la fonte unica di verità — paper legge `entry_px`
+dal wallet simulato, reale legge `entryPx` della posizione da Hyperliquid.
+`fileCicloStart.txt` resta scritto solo per compatibilità con la dashboard
+(non eliminato, come da indicazione di non rompere compatibilità), ma non è
+più letto per le decisioni di trading.
+
+**SELL non usava il prezzo di fill reale**
+File: `trailMacd.py`, ramo SELL. Usava `self.price` (mid corrente) per
+log/pnl invece del prezzo di fill effettivo restituito dall'ordine — stessa
+correzione già fatta sul ramo BUY nel giro precedente, mancava sul SELL.
+Fix: `fill_price = res.get("fill_price", self.price)` anche qui, usato per
+log e `cronoTradeMacd`.
+
+**Arrotondamento dei valori usati nelle decisioni**
+File: `botMacd.py`. MACD/signal/histogram/RSI venivano arrotondati (5
+decimali gli indicatori, 2 il RSI) **prima** di essere usati nei confronti
+decisionali (`last_macd > last_signal`, `last_histogram > previous_histogram`,
+soglie RSI 40/60). Su variazioni submillesimali dell'istogramma questo può
+nascondere un vero aumento/diminuzione. Fix: i valori interni restano a
+piena precisione; l'arrotondamento si applica solo nei print/log
+(`:.5f`/`:.2f` espliciti nelle f-string).
+
+**Timestamp non uniformi in UTC**
+File: `botMacd.py`, `trailMacd.py`, `hl.py`. `datetime.now()`/
+`datetime.datetime.now()` erano naive (ora locale del sistema), mentre le
+candele Hyperliquid sono in epoch ms UTC. Fix: tutti i timestamp di ciclo e
+di log (`cronoMacdString`, `cronoTradeMacd`, i due `now` nel loop di
+`botMacd.py`) usano ora `datetime.now(timezone.utc)`. La funzione
+`timeCET()` in `hl.py` non è stata toccata: è intenzionalmente per il
+display in Europe/Rome.
+
+### 5.3 — Punti dell'analisi esterna valutati VALIDI ma NON applicati (bassa priorità o richiedono una decisione)
+
+- Reconcile della posizione dopo l'ordine reale (verifica su Hyperliquid
+  invece di assumere l'esito) — rilevante solo in modalità reale/testnet,
+  non per il paper trading attuale.
+- Rinominare `get_balance("USDC")` in `get_account_equity()` — naming, zero
+  impatto funzionale, già documentato via commento nel codice.
+- Gestione esplicita di `STOP TRIGGERED` lato reale — Fase D (testnet),
+  non ora.
+- `bot_state.json` per la dashboard (stato vero del trail invece di
+  reinferirlo) — miglioramento di osservabilità, Fase B.
+- Arricchire il wallet paper con `equity`, `unrealized_pnl_usd`,
+  `peak_equity`, `max_drawdown_usd` — Fase B.
+- Modellare spread/slippage nel paper trading — Fase B/C, il trailing
+  stretto ($0.20 su HYPE ~$70, ~0.28%) rende questo rilevante ma non
+  bloccante subito.
+- Verificare il MACD contro una libreria standard prima del backtest —
+  Fase C per definizione.
+
+### 5.4 — Verifica effettuata
+
+`python3 -m py_compile botMacd.py trailMacd.py hl.py indicators.py
+jbmainMacd.py` e controllo `ast.parse` su tutti i file toccati: sintassi
+valida. Verificato a mano che non restino riferimenti alla vecchia variabile
+locale `priceMin` (ora tutto `self.priceMin`, popolato da
+`get_entry_price()`). **Non testato contro l'API Hyperliquid reale**: prima
+di un nuovo run va rifatto un paper trading di verifica, in particolare per
+osservare i log `BUY NON ESEGUITO`/`SELL NON ESEGUITO` (nuovi) e confermare
+che `priceMin` nei log corrisponda a `entry_px` del wallet paper.
+
+## 6. Riepilogo priorità (aggiornato dopo il secondo giro)
 
 | # | Problema | Stato | Priorità prima di REAL=y |
 |---|----------|-------|---------------------------|
 | 1.1 | Crash su candele insufficienti | ✅ Corretto | — |
 | 1.2 | Nessun try/except nel loop | ✅ Corretto | — |
 | 1.3 | Soglia sell hardcoded in unità coin | ✅ Corretto | — |
-| 1.4 | Stop-loss su prezzo disallineato | ✅ Corretto (paper) | Verificare §3.4 in reale |
+| 1.4 | Stop-loss su prezzo disallineato (BUY) | ✅ Corretto | — |
 | 1.5 | Scritture file non atomiche | ✅ Corretto | — |
-| 3.1 | Secret key in chiaro / tracciata da git | ❌ Da fare | **Bloccante** |
-| 3.2 | Stop-loss reale come limit order | ❌ Da fare (serve tua scelta) | **Bloccante** |
-| 3.3 | Istanze ridondanti / design | ❌ Backlog | Non bloccante |
-| 3.4 | fill_price sul ramo reale | ❌ Da verificare | **Bloccante** |
+| 5.2 | Candela ancora in formazione nel calcolo indicatori | ✅ Corretto | — |
+| 5.2 | Fee sottratta due volte | ✅ Corretto | — |
+| 5.2 | Ordine rifiutato trattato come eseguito | ✅ Corretto | Verificare in reale/testnet |
+| 5.2 | `priceMin` disallineato da `entry_px` | ✅ Corretto | — |
+| 5.2 | SELL senza fill_price reale | ✅ Corretto | — |
+| 5.2 | Arrotondamento nelle decisioni MACD/RSI | ✅ Corretto | — |
+| 5.2 | Timestamp non uniformi UTC | ✅ Corretto | — |
+| 3.1 | Secret key in chiaro / tracciata da git | ⚠️ Verificare stato attuale (`.env.example` già presente in repo) | **Bloccante se non ancora fatto** |
+| 3.2 | Stop-loss reale come limit order | ✅ Risolto (isMarket=True, verificato in `hl.py` riga 374) | — |
+| 3.3 | Istanze ridondanti / design | ✅ Risolto (shared instance già in uso, §5.1) | — |
+| 3.4 | fill_price sul ramo reale | ✅ Risolto (`_normalize_order_result` con `filled`/`avgPx`, §5.2) | Verificare in reale/testnet |
+
+**Nota sul punto 3.1**: verificato in questo giro, incluso uno scan di
+`git log --all -- config.py` su tutti i commit passati. Il repo attuale ha
+`.env.example`, `config.py` legge le chiavi da variabili d'ambiente
+(`os.environ.get("HL_SECRET_KEY", "")`), `.gitignore` contiene `.env`, e
+**nessun commit precedente di `config.py` contiene una chiave privata in
+chiaro**. Il punto è quindi chiuso senza riserve.
+
+**Cosa resta aperto, non bloccante per il paper trading**: reconcile
+posizione dopo ordine reale, naming `get_balance`, `bot_state.json` per la
+dashboard, arricchimento wallet paper (equity/drawdown), modello
+spread/slippage nel paper, verifica MACD contro libreria standard prima del
+backtest — vedi §5.3 per il dettaglio.
