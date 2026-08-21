@@ -98,6 +98,9 @@ class CryptoBot:
             elif self.timeframe == "5s":
                 # Hyperliquid non supporta 5s: si usa 1m
                 seconds_until_next_time = 60 - now.second
+            elif self.timeframe == "5m":
+                cinque_minuti = now.minute + 5 - (now.minute % 5)
+                seconds_until_next_time = ((cinque_minuti - now.minute) * 60) - now.second
             elif self.timeframe == "15m":
                 quindici_minuti = now.minute + 15 - (now.minute % 15)
                 seconds_until_next_time = ((quindici_minuti - now.minute) * (60)) - now.second

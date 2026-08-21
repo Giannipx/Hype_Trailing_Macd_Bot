@@ -5,3 +5,4 @@ __pycache__/
 # stato runtime del paper trading (i file .txt runtime sono solo valori
 # simulati e vengono committati; paper_wallet.json resta locale)
 paper_wallet.json
+GPT.md
