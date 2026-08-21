@@ -8,6 +8,25 @@ from trailMacd import StopTrail
 
 
 class CryptoBot:
+    """
+    HYPE Trailing MACD Bot.
+
+    Versione aggiornata con:
+    - filtro trend 15m per i BUY
+    - limite esposizione massima
+    - massimo numero di ingressi
+    - riarmo del setup BUY
+    - hard stop loss
+    """
+
+    # ==========================================================
+    # RISK MANAGEMENT
+    # ==========================================================
+    # Non serve modificare config.py per questi tre parametri.
+    MAX_POSITION_PCT = 0.50       # max 50% dell'equity in HYPE
+    MAX_BUY_ENTRIES = 2           # max 2 BUY per ciclo di posizione
+    MAX_LOSS_PCT = 0.01           # hard stop: -1% dal prezzo medio
+
     def __init__(
         self,
         market,
@@ -25,16 +44,21 @@ class CryptoBot:
         sma2_period=50,
         trend_timeframe="15m",
     ):
-        # Istanza per il wallet (reale) / simulato (paper)
-        self.wallet_binance = Hyperliquid(real=real, market=market)
+        # Wallet / ordini
+        self.wallet_binance = Hyperliquid(
+            real=real,
+            market=market,
+        )
 
-        # Istanza per i dati di mercato (sempre live)
-        self.data_binance = Hyperliquid(real=real, market=market)
+        # Dati di mercato sempre live
+        self.data_binance = Hyperliquid(
+            real=real,
+            market=market,
+        )
 
         self.market = market
         self.timeframe = timeframe
         self.trend_timeframe = trend_timeframe
-
         self.limit = limit
 
         self.rsi_period = rsi_period
@@ -66,10 +90,21 @@ class CryptoBot:
         self.trend_price = None
         self.trend_bullish = False
 
+        # Trailing
         self.trailBuy = False
         self.trailSell = False
 
+        # Wallet
         self.walletType = "Null"
+
+        # ------------------------------------------------------
+        # RISK MANAGEMENT
+        # ------------------------------------------------------
+        self.buy_entries = 0
+
+        # Dopo un BUY il setup deve prima "scaricarsi"
+        # prima di consentire un nuovo BUY.
+        self.buy_armed = True
 
         self._prompt_reset_paper()
         self.wallet()
@@ -79,11 +114,6 @@ class CryptoBot:
     # ==========================================================
 
     def _prompt_reset_paper(self):
-        """
-        All'avvio chiede se resettare il wallet paper
-        (paper_wallet.json) ricominciando dai valori di
-        walletIniziale.txt. Solo in paper mode.
-        """
         if self.real == "y":
             return
 
@@ -179,6 +209,21 @@ class CryptoBot:
         )
 
         print(
+            "Risk max position: %.0f%% equity"
+            % (self.MAX_POSITION_PCT * 100)
+        )
+
+        print(
+            "Risk max BUY:      %d"
+            % self.MAX_BUY_ENTRIES
+        )
+
+        print(
+            "Hard stop:         -%.2f%%"
+            % (self.MAX_LOSS_PCT * 100)
+        )
+
+        print(
             "Leva:              %gx (%s)"
             % (
                 config.LEVERAGE,
@@ -200,7 +245,11 @@ class CryptoBot:
 
         print("  Wallet iniziale (walletIniziale.txt):")
 
-        for tok, val in self.wallet_binance.read_wallet_iniziale().items():
+        for tok, val in (
+            self.wallet_binance
+            .read_wallet_iniziale()
+            .items()
+        ):
             print("    %s: %s" % (tok, val))
 
         pw = self.wallet_binance.paper_wallet_dump()
@@ -223,51 +272,32 @@ class CryptoBot:
 
         if self.real == "y":
             print(
-                "      Modalità REALE attiva: ordini veri su "
-                "Hyperliquid %s - verifica chiavi e bilanci in config.py"
+                "Modalità REALE attiva: ordini veri su "
+                "Hyperliquid %s"
                 % rete
             )
-
             print(
-                "   [REALE] Saldo conto (USDC): %.2f$"
+                "[REALE] Saldo conto (USDC): %.2f$"
                 % self.stableCoin
             )
-
         else:
             print(
-                "      Modalità PAPER TRADING attiva: "
-                "dati reali da %s, nessun ordine reale, "
-                "nessuna chiave privata richiesta"
+                "Modalità PAPER TRADING attiva: "
+                "dati reali da %s, nessun ordine reale"
                 % rete
             )
-
             print(
-                "   [PAPER] Saldo simulato: %.2f$"
+                "[PAPER] Saldo simulato: %.2f$"
                 % self.stableCoin
             )
 
         print("")
 
     # ==========================================================
-    # CALCOLO TREND 15m
+    # TREND FILTER
     # ==========================================================
 
     def calculate_trend_filter(self):
-        """
-        Calcola il trend sul timeframe superiore.
-
-        LONG consentito solamente se:
-
-            trend_price > trend_SMA50
-            AND
-            trend_SMA20 > trend_SMA50
-
-        Il filtro viene utilizzato esclusivamente per autorizzare
-        nuovi BUY.
-
-        I SELL rimangono gestiti dalla logica MACD esistente.
-        """
-
         trend_ohlcv = self.data_binance.ohlcv_data(
             self.market,
             self.trend_timeframe,
@@ -321,6 +351,271 @@ class CryptoBot:
         return self.trend_bullish
 
     # ==========================================================
+    # HARD STOP LOSS
+    # ==========================================================
+
+    def check_hard_stop(self):
+        """
+        Chiude tutta la posizione se il prezzo scende di MAX_LOSS_PCT
+        sotto il prezzo medio di carico.
+
+        Questo stop è indipendente dal MACD e dal trailing.
+        """
+
+        if self.cryptoCoin <= 0:
+            return False
+
+        if self.priceMin <= 0:
+            return False
+
+        stop_price = (
+            self.priceMin
+            * (1.0 - self.MAX_LOSS_PCT)
+        )
+
+        if self.price > stop_price:
+            return False
+
+        print("")
+        print("=" * 60)
+        print("!!! HARD STOP LOSS !!!")
+        print(
+            "Prezzo medio:      %.4f"
+            % self.priceMin
+        )
+        print(
+            "Prezzo corrente:   %.4f"
+            % self.price
+        )
+        print(
+            "Stop:              %.4f (-%.2f%%)"
+            % (
+                stop_price,
+                self.MAX_LOSS_PCT * 100,
+            )
+        )
+        print(
+            "Posizione:         %.4f HYPE"
+            % self.cryptoCoin
+        )
+        print("=" * 60)
+
+        try:
+            # Se esiste uno stop reale già aperto, cancellalo
+            # prima della chiusura manuale.
+            if (
+                self.real == "y"
+                and self.stoplossorder == "y"
+            ):
+                try:
+                    self.wallet_binance.elimina_ordine(
+                        self.market
+                    )
+                except Exception as e:
+                    print(
+                        "Avviso cancellazione SL: %s"
+                        % e
+                    )
+
+            amount = self.wallet_binance.round_size(
+                self.market.split("/")[0],
+                self.cryptoCoin,
+            )
+
+            if amount <= 0:
+                return False
+
+            result = self.wallet_binance.sell(
+                self.market,
+                amount,
+                self.price,
+            )
+
+            if not result.get("filled", False):
+                print(
+                    "HARD STOP NON ESEGUITO: %s"
+                    % result.get("error")
+                )
+
+                self.data_binance.cronoMacdString(
+                    "HARD STOP NON ESEGUITO",
+                    result.get("error"),
+                )
+
+                return False
+
+            fill_price = result.get(
+                "fill_price",
+                self.price,
+            )
+
+            pnl = result.get(
+                "pnl",
+                0.0,
+            )
+
+            fee = result.get(
+                "fee",
+                0.0,
+            )
+
+            self.data_binance.cronoMacdString(
+                "HARD STOP | Entry %.4f | "
+                "Trigger %.4f | Fill %.4f | "
+                "PnL %.4f | Fee %.4f"
+                % (
+                    self.priceMin,
+                    stop_price,
+                    fill_price,
+                    pnl,
+                    fee,
+                )
+            )
+
+            print(
+                "HARD STOP ESEGUITO | Fill %.4f | "
+                "PnL %.4f | Fee %.4f"
+                % (
+                    fill_price,
+                    pnl,
+                    fee,
+                )
+            )
+
+            self.buy_entries = 0
+            self.buy_armed = True
+            self.previous_histogram = None
+
+            self.wallet()
+
+            return True
+
+        except Exception as e:
+            print(
+                "Errore HARD STOP: %s"
+                % e
+            )
+
+            self.data_binance.cronoMacdString(
+                "ERRORE HARD STOP",
+                str(e),
+            )
+
+            return False
+
+    # ==========================================================
+    # BUY RISK FILTER
+    # ==========================================================
+
+    def can_open_buy(self):
+        """
+        Controlla:
+        - massimo numero di BUY;
+        - nuovo setup MACD;
+        - massima esposizione.
+        """
+
+        if self.buy_entries >= self.MAX_BUY_ENTRIES:
+            print(
+                "RISK FILTER [NO BUY] | "
+                "MAX_BUY_ENTRIES=%d"
+                % self.MAX_BUY_ENTRIES
+            )
+
+            self.data_binance.cronoMacdString(
+                "BUY BLOCCATO | MAX_BUY_ENTRIES | entries=%d"
+                % self.buy_entries
+            )
+
+            return False
+
+        if not self.buy_armed:
+            print(
+                "RISK FILTER [NO BUY] | "
+                "SETUP NON RIARMATO"
+            )
+
+            self.data_binance.cronoMacdString(
+                "BUY BLOCCATO | SETUP NON RIARMATO"
+            )
+
+            return False
+
+        position_value = (
+            self.cryptoCoin * self.price
+        )
+
+        equity = (
+            self.stableCoin
+            + position_value
+        )
+
+        max_position = (
+            equity * self.MAX_POSITION_PCT
+        )
+
+        next_buy_value = self.stableBot
+
+        if (
+            position_value + next_buy_value
+            > max_position
+        ):
+            print(
+                "RISK FILTER [NO BUY] | MAX POSITION"
+            )
+
+            print(
+                "  Posizione attuale: $%.2f"
+                % position_value
+            )
+
+            print(
+                "  Max posizione:     $%.2f"
+                % max_position
+            )
+
+            self.data_binance.cronoMacdString(
+                "BUY BLOCCATO | MAX_POSITION | "
+                "position=%.2f | max=%.2f"
+                % (
+                    position_value,
+                    max_position,
+                )
+            )
+
+            return False
+
+        return True
+
+    # ==========================================================
+    # RIARMO BUY
+    # ==========================================================
+
+    def rearm_buy_setup_if_needed(self):
+        """
+        Un BUY disarma il setup.
+        Quando l'istogramma torna a peggiorare, il setup viene
+        considerato terminato e un nuovo BUY potrà essere cercato.
+        """
+
+        if self.buy_armed:
+            return
+
+        if self.previous_histogram is None:
+            return
+
+        if self.last_histogram < self.previous_histogram:
+            self.buy_armed = True
+
+            print(
+                "BUY SETUP RIARMATO"
+            )
+
+            self.data_binance.cronoMacdString(
+                "BUY SETUP RIARMATO"
+            )
+
+    # ==========================================================
     # RUN
     # ==========================================================
 
@@ -330,7 +625,7 @@ class CryptoBot:
         while True:
 
             # --------------------------------------------------
-            # Sincronizzazione UTC con il timeframe
+            # SINCRONIZZAZIONE TIMEFRAME
             # --------------------------------------------------
 
             now = datetime.datetime.now(
@@ -338,21 +633,16 @@ class CryptoBot:
             )
 
             if self.timeframe == "1m":
-
                 seconds_until_next_time = (
                     60 - now.second
                 )
 
             elif self.timeframe == "5s":
-
-                # Hyperliquid non supporta 5s:
-                # si utilizza 1m.
                 seconds_until_next_time = (
                     60 - now.second
                 )
 
             elif self.timeframe == "5m":
-
                 cinque_minuti = (
                     now.minute
                     + 5
@@ -365,7 +655,6 @@ class CryptoBot:
                 )
 
             elif self.timeframe == "15m":
-
                 quindici_minuti = (
                     now.minute
                     + 15
@@ -378,7 +667,6 @@ class CryptoBot:
                 )
 
             elif self.timeframe == "30m":
-
                 trenta_minuti = (
                     now.minute
                     + 30
@@ -391,35 +679,21 @@ class CryptoBot:
                 )
 
             elif self.timeframe == "1h":
-
                 seconds_until_next_time = (
                     3600
                     - (now.minute * 60 + now.second)
                 )
 
             else:
-
                 seconds_until_next_time = 0
 
             if seconds_until_next_time > 0:
                 time.sleep(seconds_until_next_time)
 
-            # --------------------------------------------------
-            # Piccolo buffer dopo la chiusura della candela
-            # --------------------------------------------------
-            #
-            # hl.py utilizza già closed_only=True.
-            # Questo buffer evita però di interrogare l'API
-            # esattamente sul boundary del timeframe.
-            #
-            # Non viene utilizzato per il trailing, solamente
-            # per il calcolo del nuovo segnale MACD.
-            # --------------------------------------------------
-
+            # Buffer dopo chiusura candela
             time.sleep(2)
 
             if self.stoplossorder == "y":
-
                 self.wallet_binance.verifica_ordini(
                     self.market
                 )
@@ -433,11 +707,6 @@ class CryptoBot:
             # --------------------------------------------------
 
             try:
-
-                # ==============================
-                # TIMEFRAME OPERATIVO
-                # ==============================
-
                 ohlcv = self.data_binance.ohlcv_data(
                     self.market,
                     self.timeframe,
@@ -453,10 +722,9 @@ class CryptoBot:
                 )
 
                 if len(closes) < min_richieste:
-
                     print(
                         "Dati insufficienti: %d candele "
-                        "(minimo %d). Salto questo ciclo."
+                        "(minimo %d)."
                         % (
                             len(closes),
                             min_richieste,
@@ -474,26 +742,14 @@ class CryptoBot:
 
                     continue
 
-                # ==============================
-                # MACD
-                # ==============================
-
                 macd_line, signal_line, histogram = (
                     indicators.macd_series(closes)
                 )
-
-                # ==============================
-                # RSI
-                # ==============================
 
                 rsi_values = indicators.rsi(
                     closes,
                     self.rsi_period,
                 )
-
-                # ==============================
-                # SMA 20 / SMA 50
-                # ==============================
 
                 sma1 = indicators.sma(
                     closes,
@@ -513,11 +769,9 @@ class CryptoBot:
                     or sma1 is None
                     or sma2 is None
                 ):
-
                     print(
-                        "Indicatori non calcolabili "
-                        "su questo batch di candele. "
-                        "Salto questo ciclo."
+                        "Indicatori non calcolabili. "
+                        "Salto ciclo."
                     )
 
                     self.data_binance.cronoMacdString(
@@ -527,10 +781,6 @@ class CryptoBot:
 
                     continue
 
-                # ==============================
-                # INDICATORI FULL PRECISION
-                # ==============================
-
                 self.last_macd = macd_line[-1]
                 self.last_signal = signal_line[-1]
                 self.last_histogram = histogram[-1]
@@ -539,17 +789,13 @@ class CryptoBot:
                 self.sma1 = round(sma1, 2)
                 self.sma2 = round(sma2, 2)
 
-                # ==============================
-                # TREND FILTER 15m
-                # ==============================
-
+                # Trend 15m
                 self.calculate_trend_filter()
 
-                # Aggiorna wallet/prezzo
+                # Wallet / prezzo
                 self.wallet()
 
             except Exception as e:
-
                 print(
                     "Errore nel ciclo principale "
                     "(rete/API/indicatori): %s"
@@ -557,15 +803,20 @@ class CryptoBot:
                 )
 
                 try:
-
                     self.data_binance.cronoMacdString(
                         "ERRORE ciclo principale: %s"
                         % e
                     )
-
                 except Exception:
                     pass
 
+                continue
+
+            # --------------------------------------------------
+            # HARD STOP
+            # --------------------------------------------------
+
+            if self.check_hard_stop():
                 continue
 
             # --------------------------------------------------
@@ -582,7 +833,8 @@ class CryptoBot:
                 "TREND15m SMA50: %.4f | "
                 "TREND15m Bullish: %s | "
                 "%s: %.2f | %s: %.4f | "
-                "trailBuy: %s | trailSell: %s"
+                "trailBuy: %s | trailSell: %s | "
+                "buyEntries: %d | buyArmed: %s"
                 % (
                     self.multiSize,
                     self.price,
@@ -602,13 +854,13 @@ class CryptoBot:
                     self.cryptoCoin,
                     self.trailBuy,
                     self.trailSell,
+                    self.buy_entries,
+                    self.buy_armed,
                 )
             )
 
-            print(
-                "********** WALLET [%s] *************"
-                % self.walletType
-            )
+            print("********** WALLET [%s] *************"
+                  % self.walletType)
 
             print(
                 "TRAIL NEW MULTIPLER [%s]"
@@ -646,7 +898,7 @@ class CryptoBot:
 
             print(
                 "  RSI (%s periodi): %.2f "
-                "update 40/60 - SMA20: %.2f - SMA50: %.2f"
+                "SMA20: %.2f - SMA50: %.2f"
                 % (
                     self.rsi_period,
                     self.last_rsi,
@@ -712,21 +964,29 @@ class CryptoBot:
             )
 
             print(
-                "BUY: %s - SELL: %s"
+                "BUY: %s - SELL: %s | "
+                "BUY entries: %d/%d | armed: %s"
                 % (
                     self.trailBuy,
                     self.trailSell,
+                    self.buy_entries,
+                    self.MAX_BUY_ENTRIES,
+                    self.buy_armed,
                 )
             )
 
-            print(
-                "*********************************************"
-            )
+            print("*********************************************")
             print("")
 
-            # ==================================================
+            # --------------------------------------------------
+            # RIARMO SETUP
+            # --------------------------------------------------
+
+            self.rearm_buy_setup_if_needed()
+
+            # --------------------------------------------------
             # SEGNALI MACD
-            # ==================================================
+            # --------------------------------------------------
 
             if self.previous_histogram is not None:
 
@@ -736,17 +996,15 @@ class CryptoBot:
                     5,
                 )
 
-                # --------------------------------------------------
+                # ==============================================
                 # AUMENTO POSITIVO
-                # Nessuna operazione
-                # --------------------------------------------------
+                # ==============================================
 
                 if (
                     self.last_macd > self.last_signal
                     and self.last_histogram
                     > self.previous_histogram
                 ):
-
                     trend = "MACD: Aumento positivo"
 
                     print(
@@ -754,10 +1012,9 @@ class CryptoBot:
                         "[no]"
                     )
 
-                # --------------------------------------------------
-                # DIMINUZIONE POSITIVO
-                # SELL
-                # --------------------------------------------------
+                # ==============================================
+                # DIMINUZIONE POSITIVO -> SELL
+                # ==============================================
 
                 elif (
                     self.last_macd > self.last_signal
@@ -833,34 +1090,36 @@ class CryptoBot:
 
                                     self.wallet()
 
-                                else:
+                                    # Se la posizione è stata
+                                    # completamente chiusa,
+                                    # il prossimo setup riparte
+                                    # da zero.
+                                    if self.cryptoCoin <= 0:
+                                        self.buy_entries = 0
+                                        self.buy_armed = True
+                                        self.previous_histogram = None
 
+                                else:
                                     print(
                                         "trailSell False"
                                     )
 
                             else:
-
                                 print(
                                     "Prezzo medio non superato"
                                 )
 
                         else:
-
-                            print(
-                                "zero coin"
-                            )
+                            print("zero coin")
 
                     else:
-
                         print(
                             "RSI negativo [no]"
                         )
 
-                # --------------------------------------------------
-                # DIMINUZIONE NEGATIVO
-                # BUY
-                # --------------------------------------------------
+                # ==============================================
+                # DIMINUZIONE NEGATIVO -> BUY
+                # ==============================================
 
                 elif (
                     self.last_macd < self.last_signal
@@ -888,9 +1147,9 @@ class CryptoBot:
                             "RSI negativo [ok]"
                         )
 
-                        # ==========================================
-                        # NUOVO FILTRO TREND
-                        # ==========================================
+                        # --------------------------------------
+                        # TREND 15m
+                        # --------------------------------------
 
                         if not self.trend_bullish:
 
@@ -899,18 +1158,27 @@ class CryptoBot:
                             )
 
                             print(
-                                "  Price 15m: %.4f"
-                                % self.trend_price
+                                "  Price %s: %.4f"
+                                % (
+                                    self.trend_timeframe,
+                                    self.trend_price,
+                                )
                             )
 
                             print(
-                                "  SMA20 15m: %.4f"
-                                % self.trend_sma1
+                                "  SMA20 %s: %.4f"
+                                % (
+                                    self.trend_timeframe,
+                                    self.trend_sma1,
+                                )
                             )
 
                             print(
-                                "  SMA50 15m: %.4f"
-                                % self.trend_sma2
+                                "  SMA50 %s: %.4f"
+                                % (
+                                    self.trend_timeframe,
+                                    self.trend_sma2,
+                                )
                             )
 
                             self.data_binance.cronoMacdString(
@@ -932,7 +1200,14 @@ class CryptoBot:
                                 "Wallet Stable >10 [ok]"
                             )
 
-                            if self.trailBuy:
+                            # ----------------------------------
+                            # RISK MANAGEMENT
+                            # ----------------------------------
+
+                            if not self.can_open_buy():
+                                pass
+
+                            elif self.trailBuy:
 
                                 self.data_binance.cronoMacd(
                                     now,
@@ -962,28 +1237,49 @@ class CryptoBot:
 
                                 self.wallet()
 
-                            else:
+                                # Il BUY viene considerato
+                                # eseguito solo se la posizione
+                                # è effettivamente presente.
+                                if (
+                                    self.cryptoCoin > 0
+                                    and self.priceMin > 0
+                                ):
+                                    self.buy_entries += 1
+                                    self.buy_armed = False
 
+                                    print(
+                                        "RISK | BUY entry #%d"
+                                        % self.buy_entries
+                                    )
+
+                                    self.data_binance.cronoMacdString(
+                                        "RISK | BUY entry #%d | "
+                                        "entry %.4f | size %.4f"
+                                        % (
+                                            self.buy_entries,
+                                            self.priceMin,
+                                            self.cryptoCoin,
+                                        )
+                                    )
+
+                            else:
                                 print(
                                     "trailBuy False"
                                 )
 
                         else:
-
                             print(
                                 "zero stableCoin [no]"
                             )
 
                     else:
-
                         print(
                             "RSI positivo [no]"
                         )
 
-                # --------------------------------------------------
+                # ==============================================
                 # AUMENTO NEGATIVO
-                # Nessuna operazione
-                # --------------------------------------------------
+                # ==============================================
 
                 elif (
                     self.last_macd < self.last_signal
@@ -1006,12 +1302,11 @@ class CryptoBot:
                     )
 
             else:
-
                 trend = "N/A"
 
-            # ==================================================
-            # MEMORIZZA HISTOGRAM PER IL CICLO SUCCESSIVO
-            # ==================================================
+            # --------------------------------------------------
+            # MEMORIZZA HISTOGRAM
+            # --------------------------------------------------
 
             self.previous_histogram = (
                 self.last_histogram
@@ -1022,7 +1317,6 @@ class CryptoBot:
     # ==========================================================
 
     def wallet(self):
-
         self.price = self.data_binance.get_price(
             self.market
         )
@@ -1091,25 +1385,19 @@ class CryptoBot:
             )
         )
 
-        # SELL trailing disponibile solo se il prezzo
-        # corrente è sopra il prezzo medio.
+        # SELL trailing disponibile solo sopra
+        # il prezzo medio.
         if (
             self.price > self.priceMin
             and self.cryptoCoin > 0
         ):
-
             self.trailSell = True
-
         else:
-
             self.trailSell = False
 
-        # BUY trailing disponibile se abbiamo almeno
-        # 10 USDC investibili.
+        # BUY trailing disponibile se abbiamo
+        # almeno 10 USDC investibili.
         if self.stableBot > 10:
-
             self.trailBuy = True
-
         else:
-
             self.trailBuy = False

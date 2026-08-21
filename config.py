@@ -27,6 +27,7 @@ HL_SECRET_KEY = os.environ.get("HL_SECRET_KEY", "")
 FEE_PCT = 0.00035
 START_BALANCE_USD = 1000.0
 
+
 # Leva e margine per gli ordini PERPETUAL reali (usati solo con REAL=y).
 # ISOLATED = "y" -> margine isolato | "n" -> cross (default HL)
 LEVERAGE = 1.0
