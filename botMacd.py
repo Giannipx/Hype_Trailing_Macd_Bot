@@ -144,6 +144,19 @@ class CryptoBot:
         if ans.strip().lower() == "y":
             self.wallet_binance.reset_balance()
 
+        try:
+            ans = input(
+                "Vuoi resettare anche la cronologia "
+                "(cronoMacd.txt)? [y/N]: "
+            )
+        except EOFError:
+            ans = ""
+
+        if ans.strip().lower() == "y":
+            with open(config.CRONO_FILE, "w"):
+                pass
+            print("Cronologia paper resettata: %s" % config.CRONO_FILE)
+
     # ==========================================================
     # BANNER
     # ==========================================================
