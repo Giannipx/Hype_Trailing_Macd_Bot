@@ -131,6 +131,65 @@ class Hyperliquid:
             ])
         return out
 
+    def ohlcv_history(self, market, timeframe, start_ms, end_ms, page_candles=4500):
+        """Scarica uno storico esteso (giorni/settimane), paginando le
+        richieste a candles_snapshot. USATO SOLO da backtest.py, non dal
+        loop live (ohlcv_data() sopra resta invariato per il bot in
+        esecuzione). Ritorna liste di 7 campi (invece dei 6 di ohlcv_data):
+        [open_time_ms, o, h, l, c, v, close_time_ms] — il close_time serve
+        al backtest per allineare correttamente il timeframe di trend (15m)
+        a ogni istante storico simulato, cosa che il bot live non deve fare
+        perché lavora sempre sul "adesso".
+        """
+        interval = self._map_interval(timeframe)
+        seconds = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+                   "1h": 3600, "2h": 7200, "4h": 14400}.get(interval, 60)
+
+        out = []
+        seen_t = set()
+        cursor = start_ms
+        page_span_ms = page_candles * seconds * 1000
+
+        while cursor < end_ms:
+            chunk_end = min(cursor + page_span_ms, end_ms)
+            res = self.info.candles_snapshot(
+                self._coin(market), interval,
+                startTime=cursor, endTime=chunk_end,
+            )
+            if not res:
+                cursor = chunk_end
+                continue
+            for c in res:
+                t = int(c.get("t", 0))
+                if t in seen_t:
+                    continue
+                seen_t.add(t)
+                out.append([
+                    t,
+                    float(c.get("o", 0)),
+                    float(c.get("h", 0)),
+                    float(c.get("l", 0)),
+                    float(c.get("c", 0)),
+                    float(c.get("v", 0)),
+                    int(c.get("T", 0)),
+                ])
+            last_t = int(res[-1].get("t", cursor))
+            next_cursor = last_t + seconds * 1000
+            if next_cursor <= cursor:
+                # l'API non sta avanzando: evita un loop infinito
+                break
+            cursor = next_cursor
+
+        out.sort(key=lambda r: r[0])
+
+        # scarta l'ultima candela se ancora aperta (stessa logica di
+        # ohlcv_data closed_only=True)
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        if out and (out[-1][6] == 0 or out[-1][6] > now_ms):
+            out = out[:-1]
+
+        return out
+
     @staticmethod
     def _map_interval(timeframe):
         # Hyperliquid non ha '5s': il minimo è 1m
