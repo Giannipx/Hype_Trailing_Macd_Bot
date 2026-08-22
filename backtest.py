@@ -322,7 +322,8 @@ def simulate_trail(candles, start_idx, kind, stopsize, perc_stable, perc_coin,
 
 def run_backtest(candles, trend_candles, symbol, hl_util,
                   perc_stable, perc_coin, stop_floor, multi_size,
-                  atr_period, atr_mult, stoplossorder, start_cash=1000.0):
+                  atr_period, atr_mult, stoplossorder, max_loss_pct,
+                  start_cash=1000.0):
     trend_close_times = [c[6] for c in trend_candles]
 
     wallet = BacktestWallet(cash_usd=start_cash, sz=0.0)
@@ -386,7 +387,7 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
                 i += 1
                 continue
 
-            stop_price = price_min * (1.0 - CryptoBot.MAX_LOSS_PCT)
+            stop_price = price_min * (1.0 - max_loss_pct)
             stop_fill = next(
                 (p for p in intrabar_path(candles[i]) if p <= stop_price),
                 None,
@@ -533,7 +534,7 @@ def max_drawdown(equity_curve):
     return max_dd_usd, max_dd_pct
 
 
-def print_report(timeframe, days, result, start_cash, last_price):
+def print_report(timeframe, days, result, start_cash, last_price, strategy_params):
     wallet = result["wallet"]
     trades = result["trades"]
     equity_curve = result["equity_curve"]
@@ -554,6 +555,22 @@ def print_report(timeframe, days, result, start_cash, last_price):
     print("BACKTEST %s | ultimi %d giorni" % (timeframe, days))
     print("=" * 70)
     print("Candele valutate:      %d" % len(equity_curve))
+    print(
+        "Parametri: STOPSIZE $%.2f | ATR %dx%.2f | MSIZE %.2f | "
+        "PERC_STABLE %.2f | PERC_COIN %.2f | MAX_LOSS %.2f%% | "
+        "STOPLOSS %s | INTERVAL %gs"
+        % (
+            strategy_params["stop_floor"],
+            strategy_params["atr_period"],
+            strategy_params["atr_mult"],
+            strategy_params["multi_size"],
+            strategy_params["perc_stable"],
+            strategy_params["perc_coin"],
+            strategy_params["max_loss_pct"] * 100,
+            strategy_params["stoploss"],
+            strategy_params["interval"],
+        )
+    )
     print("Trade totali:          %d (BUY: %d | SELL: %d | STOP: %d)"
           % (len(trades), n_buy, n_sell, n_hard_stop))
     print("Win rate (uscite):     %.1f%% (%d/%d)" % (win_rate, wins, len(sell_trades)))
@@ -579,6 +596,15 @@ def print_report(timeframe, days, result, start_cash, last_price):
         "total_return_pct": round(total_return_pct, 2),
         "max_drawdown_usd": round(dd_usd, 2),
         "max_drawdown_pct": round(dd_pct, 2),
+        "stopsize": strategy_params["stop_floor"],
+        "atr_period": strategy_params["atr_period"],
+        "atr_mult": strategy_params["atr_mult"],
+        "msize": strategy_params["multi_size"],
+        "perc_stable": strategy_params["perc_stable"],
+        "perc_coin": strategy_params["perc_coin"],
+        "max_loss_pct": strategy_params["max_loss_pct"],
+        "stoploss": strategy_params["stoploss"],
+        "interval": strategy_params["interval"],
     }
 
 
@@ -628,6 +654,7 @@ def main():
     parser.add_argument("--multi-size", type=float, default=None)
     parser.add_argument("--atr-period", type=int, default=None)
     parser.add_argument("--atr-mult", type=float, default=None)
+    parser.add_argument("--max-loss-pct", type=float, default=None)
     parser.add_argument("--stoploss", choices=("y", "n"), default=None)
     parser.add_argument("--start-cash", type=float, default=None)
     args = parser.parse_args()
@@ -644,8 +671,24 @@ def main():
     args.multi_size = param_value(args.multi_size, params, "MSIZE", 3, float)
     args.atr_period = param_value(args.atr_period, params, "ATR_PERIOD", 14, int)
     args.atr_mult = param_value(args.atr_mult, params, "ATR_MULT", 1.5, float)
+    args.max_loss_pct = param_value(args.max_loss_pct, params, "MAX_LOSS_PCT", 0.01, float)
+    if not 0 < args.max_loss_pct < 1:
+        parser.error("MAX_LOSS_PCT deve essere una frazione tra 0 e 1 (es. 0.01 = 1%)")
     args.stoploss = param_value(args.stoploss, params, "STOPLOSS", "n", str).lower()
+    args.interval = param_value(None, params, "INTERVAL", 4, float)
     args.start_cash = config.START_BALANCE_USD if args.start_cash is None else args.start_cash
+
+    strategy_params = {
+        "stop_floor": args.stop_floor,
+        "atr_period": args.atr_period,
+        "atr_mult": args.atr_mult,
+        "multi_size": args.multi_size,
+        "perc_stable": args.perc_stable,
+        "perc_coin": args.perc_coin,
+        "max_loss_pct": args.max_loss_pct,
+        "stoploss": args.stoploss,
+        "interval": args.interval,
+    }
 
     timeframes = [t.strip() for t in args.timeframes.split(",") if t.strip()]
 
@@ -677,11 +720,14 @@ def main():
         result = run_backtest(
             candles, trend_candles, args.symbol, hl_util,
             args.perc_stable, args.perc_coin, args.stop_floor, args.multi_size,
-            args.atr_period, args.atr_mult, args.stoploss, start_cash=args.start_cash,
+            args.atr_period, args.atr_mult, args.stoploss, args.max_loss_pct,
+            start_cash=args.start_cash,
         )
 
         last_price = candles[-1][4]
-        summary = print_report(tf, args.days, result, args.start_cash, last_price)
+        summary = print_report(
+            tf, args.days, result, args.start_cash, last_price, strategy_params,
+        )
         summary_rows.append(summary)
 
         csv_path = os.path.join(OUTPUT_DIR, "trades_%s.csv" % tf)
@@ -692,14 +738,27 @@ def main():
         print("\n" + "=" * 70)
         print("RIEPILOGO COMPARATIVO")
         print("=" * 70)
-        header = "%-6s %8s %10s %12s %10s %14s %10s" % (
-            "TF", "Trade", "WinRate%", "PnL usc.$", "Fee$", "Rendimento%", "MaxDD%")
+        header = (
+            "%-6s %7s %8s %11s %8s %11s %8s | %5s %7s %5s %7s %7s %7s %3s %4s"
+            % (
+                "TF", "Trade", "WinRate%", "PnL usc.$", "Fee$", "Rendim.%", "MaxDD%",
+                "Stop", "ATR", "MSIZE", "PStable", "PCoin", "MaxLoss", "SL", "Int",
+            )
+        )
         print(header)
         for s in summary_rows:
-            print("%-6s %8d %10.1f %12.2f %10.2f %14.2f %10.2f" % (
-                s["timeframe"], s["n_trades"], s["win_rate_pct"],
-                s["realized_pnl_uscite_usd"], s["fees_usd"], s["total_return_pct"], s["max_drawdown_pct"],
-            ))
+            print(
+                "%-6s %7d %8.1f %11.2f %8.2f %11.2f %8.2f | "
+                "%5.2f %2dx%-4.2f %5.2f %7.2f %7.2f %7.2f %2s %4.0f"
+                % (
+                    s["timeframe"], s["n_trades"], s["win_rate_pct"],
+                    s["realized_pnl_uscite_usd"], s["fees_usd"],
+                    s["total_return_pct"], s["max_drawdown_pct"],
+                    s["stopsize"], s["atr_period"], s["atr_mult"],
+                    s["msize"], s["perc_stable"], s["perc_coin"], s["max_loss_pct"] * 100,
+                    s["stoploss"], s["interval"],
+                )
+            )
 
         summary_path = os.path.join(OUTPUT_DIR, "summary.csv")
         with open(summary_path, "w", newline="") as f:

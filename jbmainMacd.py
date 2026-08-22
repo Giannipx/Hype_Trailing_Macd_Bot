@@ -27,9 +27,12 @@ def main(options):
     # come prima e diventa il "pavimento" minimo dello stop dinamico.
     atr_period = int(float(myObject.get('ATR_PERIOD', 14)))
     atr_mult = float(myObject.get('ATR_MULT', 1.5))
+    max_loss_pct = float(myObject.get('MAX_LOSS_PCT', 0.01))
+    if not 0 < max_loss_pct < 1:
+        raise ValueError('MAX_LOSS_PCT deve essere una frazione tra 0 e 1 (es. 0.01 = 1%)')
 
     bot = CryptoBot(symbol, stopSize, interval, timeframe, multiSize, percStable, percCoin, real, stoplossorder,
-                     atr_period=atr_period, atr_mult=atr_mult)
+                     atr_period=atr_period, atr_mult=atr_mult, max_loss_pct=max_loss_pct)
     bot.run()
 
 if __name__ == "__main__":

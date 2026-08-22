@@ -45,6 +45,7 @@ class CryptoBot:
         trend_timeframe="15m",
         atr_period=14,
         atr_mult=1.5,
+        max_loss_pct=None,
     ):
         # Wallet / ordini
         self.wallet_binance = Hyperliquid(
@@ -81,6 +82,11 @@ class CryptoBot:
         self.atr_mult = atr_mult
         self.atr = None
         self.stopSize = stopSize  # valore iniziale, prima del primo calcolo ATR
+        self.max_loss_pct = (
+            self.MAX_LOSS_PCT
+            if max_loss_pct is None
+            else max_loss_pct
+        )
 
         self.interval = interval
         self.multiSize = multiSize
@@ -254,7 +260,7 @@ class CryptoBot:
 
         print(
             "Hard stop:         -%.2f%%"
-            % (self.MAX_LOSS_PCT * 100)
+            % (self.max_loss_pct * 100)
         )
 
         print(
@@ -390,7 +396,7 @@ class CryptoBot:
 
     def check_hard_stop(self):
         """
-        Chiude tutta la posizione se il prezzo scende di MAX_LOSS_PCT
+        Chiude tutta la posizione se il prezzo scende di max_loss_pct
         sotto il prezzo medio di carico.
 
         Questo stop è indipendente dal MACD e dal trailing.
@@ -404,7 +410,7 @@ class CryptoBot:
 
         stop_price = (
             self.priceMin
-            * (1.0 - self.MAX_LOSS_PCT)
+            * (1.0 - self.max_loss_pct)
         )
 
         if self.price > stop_price:
@@ -425,7 +431,7 @@ class CryptoBot:
             "Stop:              %.4f (-%.2f%%)"
             % (
                 stop_price,
-                self.MAX_LOSS_PCT * 100,
+                self.max_loss_pct * 100,
             )
         )
         print(

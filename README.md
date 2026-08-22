@@ -33,6 +33,7 @@ PERC_STABLE=0.10
 PERC_COIN=1
 REAL=n
 STOPLOSS=n
+MAX_LOSS_PCT=0.01
 ```
 
 | Parametro | Significato |
@@ -46,6 +47,7 @@ STOPLOSS=n
 | `PERC_COIN` | Quota della posizione coin venduta ad ogni sell (es. `1`) |
 | `REAL` | `n` = paper trading (default) \| `y` = ordini reali |
 | `STOPLOSS` | `y`/`n`: attiva il sell stop loss (trigger HL) dopo ogni buy |
+| `MAX_LOSS_PCT` | Hard stop dal prezzo medio, come frazione: `0.01` = 1% |
 
 Le altre impostazioni (leva, margine, rete, fee) sono in `config.py`:
 
