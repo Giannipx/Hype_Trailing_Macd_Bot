@@ -176,19 +176,37 @@ class Hyperliquid:
     def get_entry_price(self, market):
         """Prezzo medio di ingresso della posizione corrente.
 
-        FIX: prima il gate "vendo solo sopra il prezzo d'acquisto" leggeva
-        fileCicloStart.txt, valorizzato con `priceMin = self.price` (il
-        prezzo dell'ULTIMA singola buy), mentre il wallet paper calcola
+        FIX (giro 1): prima il gate "vendo solo sopra il prezzo d'acquisto"
+        leggeva fileCicloStart.txt, valorizzato con `priceMin = self.price`
+        (il prezzo dell'ULTIMA singola buy), mentre il wallet paper calcola
         correttamente una media ponderata (entry_px) quando si aggiunge a
-        una posizione esistente. Le due grandezze potevano divergere dopo
-        più buy consecutive (es. 10@70 poi 10@60: entry_px=65, ma
-        fileCicloStart.txt restava 60). get_entry_price() diventa la fonte
-        unica di verità: PAPER legge entry_px dal wallet simulato, REALE
-        legge entryPx della posizione da Hyperliquid.
+        una posizione esistente. get_entry_price() è la fonte unica di
+        verità: PAPER legge entry_px dal wallet simulato, REALE legge
+        entryPx della posizione da Hyperliquid.
+
+        FIX (giro 2): il saldo iniziale di walletIniziale.txt (crypto
+        "gratuita", non comprata da nessuno) viene marcato a mercato da
+        _init_paper() solo per evitare un PnL fantasma nel calcolo — quel
+        prezzo NON è un vero prezzo d'acquisto e non deve condizionare se il
+        bot può comprare/vendere. Se non è ancora avvenuto nessun BUY reale
+        del bot ("entry_is_real": False), il gate ritorna 0.0: qualunque
+        prezzo di mercato è considerato "sopra" il costo (che di fatto è
+        zero, essendo un saldo di partenza gratuito), quindi non blocca né
+        SELL né la logica di hard-stop finché il bot non ha comprato
+        davvero qualcosa.
         """
         coin = self._coin(market)
         if not self.exchange:
             d = self._load_paper()
+            # Compatibilità: un paper_wallet.json creato prima di questo fix
+            # non ha il campo "entry_is_real". In quel caso il default è
+            # True (si presume un entry_px reale da trade già avvenuti),
+            # altrimenti un wallet già in uso perderebbe silenziosamente la
+            # protezione hard-stop/gate finché non scatta un nuovo buy. Solo
+            # un wallet resettato da _init_paper() dopo questo fix parte
+            # esplicitamente da False.
+            if not d.get("entry_is_real", True):
+                return 0.0
             return float(d.get("entry_px", 0.0))
         address = self.account_address or self.exchange.wallet.address
         try:
@@ -207,6 +225,12 @@ class Hyperliquid:
             "cash_usd": config.START_BALANCE_USD,
             "sz": 0.0,
             "entry_px": 0.0,
+            # FIX: distingue un entry_px "vero" (da un buy eseguito dal bot,
+            # su cui ha senso far dipendere il gate BUY/SELL) da un entry_px
+            # "marcato a mercato" all'avvio (solo per evitare un PnL fantasma
+            # sul saldo iniziale gratuito di walletIniziale.txt, MAI un
+            # criterio di trading valido). Vedi get_entry_price() sotto.
+            "entry_is_real": False,
             "realized_pnl_usd": 0.0,
             "fees_usd": 0.0,
             "n_trades": 0,
@@ -221,12 +245,15 @@ class Hyperliquid:
         coin = self._coin(self.market)
         d["sz"] = init.get(coin, 0.0)
         # le token iniziali vengono marcate a mercato (entry = prezzo attuale)
-        # così la prima vendita non registra un PnL "fantasma" a prezzo 0
+        # così la prima vendita non registra un PnL "fantasma" a prezzo 0.
+        # entry_is_real resta False: questo prezzo NON deve mai bloccare un
+        # BUY/SELL, è solo un riferimento contabile per il calcolo del PnL.
         if d["sz"] > 0:
             try:
                 d["entry_px"] = self.get_price(self.market)
             except Exception:
                 d["entry_px"] = 0.0
+        d["entry_is_real"] = False
         self._save_paper(d)
         return d
 
@@ -382,11 +409,17 @@ class Hyperliquid:
             fee = sz * price * config.FEE_PCT
             old_sz = float(d["sz"])
             d["cash_usd"] = float(d["cash_usd"]) - sz * price - fee
-            # entry media pesata quando si aggiunge alla posizione
-            if old_sz > 0:
+            # FIX: se il saldo esistente (old_sz) era solo marcato a mercato
+            # all'avvio (entry_is_real=False, saldo "gratuito" senza un vero
+            # costo), non ha senso fare la media ponderata tra un prezzo
+            # inventato e questo buy vero: si azzera la media e riparte dal
+            # prezzo di QUESTO buy. Da qui in poi entry_is_real=True e le
+            # medie ponderate sui buy successivi sono corrette.
+            if old_sz > 0 and d.get("entry_is_real", True):
                 d["entry_px"] = ((float(d["entry_px"]) * old_sz) + (price * sz)) / (old_sz + sz)
             else:
                 d["entry_px"] = price
+            d["entry_is_real"] = True
             d["sz"] = old_sz + sz
             d["fees_usd"] = float(d["fees_usd"]) + fee
             self._save_paper(d)
@@ -423,6 +456,7 @@ class Hyperliquid:
             if d["sz"] <= 0:
                 d["sz"] = 0.0
                 d["entry_px"] = 0.0
+                d["entry_is_real"] = False
             d["realized_pnl_usd"] = float(d["realized_pnl_usd"]) + realized
             d["fees_usd"] = float(d["fees_usd"]) + fee
             d["n_trades"] = int(d["n_trades"]) + 1

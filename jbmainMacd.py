@@ -22,7 +22,14 @@ def main(options):
     real = str(myObject['REAL'])  # y/n - bot di test oppure reale
     stoplossorder = str(myObject.get('STOPLOSS', 'n'))  # y/n - stoploss per evitare perdite (opzionale)
 
-    bot = CryptoBot(symbol, stopSize, interval, timeframe, multiSize, percStable, percCoin, real, stoplossorder)
+    # STOPSIZE adattivo via ATR: opzionali, se assenti da hype.txt usano
+    # i default (14 periodi, moltiplicatore 1.5x). STOPSIZE resta letto
+    # come prima e diventa il "pavimento" minimo dello stop dinamico.
+    atr_period = int(float(myObject.get('ATR_PERIOD', 14)))
+    atr_mult = float(myObject.get('ATR_MULT', 1.5))
+
+    bot = CryptoBot(symbol, stopSize, interval, timeframe, multiSize, percStable, percCoin, real, stoplossorder,
+                     atr_period=atr_period, atr_mult=atr_mult)
     bot.run()
 
 if __name__ == "__main__":

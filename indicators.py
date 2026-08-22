@@ -57,6 +57,44 @@ def rsi(closes, period=14):
     return 100 - (100 / (1 + rs))
 
 
+def atr(candles, period=14):
+    """Average True Range (Wilder smoothing, stessa logica di rsi() sopra).
+    candles: lista di [timestamp, open, high, low, close, volume] dal più
+    vecchio al più recente (formato ohlcv_data() di hl.py). Ritorna l'ultimo
+    valore ATR, o None se i dati sono insufficienti (< period + 1 candele).
+
+    Serve per uno STOPSIZE adattivo: un trailing stop fisso in dollari (es.
+    $0.20) è troppo largo o troppo stretto a seconda della volatilità
+    corrente; l'ATR misura l'escursione di prezzo media recente e permette
+    di far seguire allo stop la volatilità reale invece di un valore
+    arbitrario e statico.
+    """
+    if len(candles) < period + 1:
+        return None
+
+    true_ranges = []
+    for i in range(1, len(candles)):
+        high = candles[i][2]
+        low = candles[i][3]
+        prev_close = candles[i - 1][4]
+        tr = max(
+            high - low,
+            abs(high - prev_close),
+            abs(low - prev_close),
+        )
+        true_ranges.append(tr)
+
+    if len(true_ranges) < period:
+        return None
+
+    # primo ATR = media semplice dei primi `period` True Range
+    avg = sum(true_ranges[:period]) / period
+    for tr in true_ranges[period:]:
+        avg = (avg * (period - 1) + tr) / period
+
+    return avg
+
+
 def sma(closes, period):
     """Ultima SMA sul periodo. None se dati insufficienti."""
     if len(closes) < period:

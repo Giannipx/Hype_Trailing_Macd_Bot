@@ -43,6 +43,8 @@ class CryptoBot:
         sma1_period=20,
         sma2_period=50,
         trend_timeframe="15m",
+        atr_period=14,
+        atr_mult=1.5,
     ):
         # Wallet / ordini
         self.wallet_binance = Hyperliquid(
@@ -65,7 +67,21 @@ class CryptoBot:
         self.sma1_period = sma1_period
         self.sma2_period = sma2_period
 
-        self.stopSize = stopSize
+        # ------------------------------------------------------
+        # STOPSIZE ADATTIVO (ATR)
+        # ------------------------------------------------------
+        # STOPSIZE da hype.txt diventa un PAVIMENTO di sicurezza, non più
+        # il valore usato direttamente: ad ogni ciclo self.stopSize viene
+        # ricalcolato come ATR(atr_period) * atr_mult sul timeframe
+        # operativo, con un minimo di stop_floor (il vecchio STOPSIZE
+        # statico) per evitare uno stop irrealisticamente stretto quando
+        # la volatilità recente è quasi nulla (es. mercato piatto di notte).
+        self.stop_floor = stopSize
+        self.atr_period = atr_period
+        self.atr_mult = atr_mult
+        self.atr = None
+        self.stopSize = stopSize  # valore iniziale, prima del primo calcolo ATR
+
         self.interval = interval
         self.multiSize = multiSize
         self.percStable = percStable
@@ -164,8 +180,13 @@ class CryptoBot:
         print("Timeframe trend:   %s" % self.trend_timeframe)
 
         print(
-            "Trail Stop Size:   $%.2f"
-            % self.stopSize
+            "Trail Stop Size:   $%.2f (pavimento) "
+            "- adattivo via ATR(%d) x%.1f"
+            % (
+                self.stop_floor,
+                self.atr_period,
+                self.atr_mult,
+            )
         )
 
         print(
@@ -718,6 +739,7 @@ class CryptoBot:
                 min_richieste = max(
                     self.sma2_period,
                     self.rsi_period + 1,
+                    self.atr_period + 1,
                     35,
                 )
 
@@ -761,6 +783,11 @@ class CryptoBot:
                     self.sma2_period,
                 )
 
+                atr_value = indicators.atr(
+                    ohlcv,
+                    self.atr_period,
+                )
+
                 if (
                     not histogram
                     or not macd_line
@@ -768,6 +795,7 @@ class CryptoBot:
                     or rsi_values is None
                     or sma1 is None
                     or sma2 is None
+                    or atr_value is None
                 ):
                     print(
                         "Indicatori non calcolabili. "
@@ -788,6 +816,18 @@ class CryptoBot:
 
                 self.sma1 = round(sma1, 2)
                 self.sma2 = round(sma2, 2)
+
+                # FIX: STOPSIZE adattivo. self.stop_floor è il vecchio
+                # valore statico da hype.txt, usato come minimo per evitare
+                # uno stop troppo stretto quando l'ATR crolla (mercato
+                # piatto). atr_mult amplifica la volatilità recente per
+                # dare margine al trailing stop di respirare senza essere
+                # toccato dal rumore normale.
+                self.atr = atr_value
+                self.stopSize = round(
+                    max(self.stop_floor, self.atr * self.atr_mult),
+                    4,
+                )
 
                 # Trend 15m
                 self.calculate_trend_filter()
@@ -828,6 +868,7 @@ class CryptoBot:
                 "MACD: %.5f | Signal: %.5f | "
                 "Histo: %.5f | RSI: %.2f | "
                 "SMA20: %.2f | SMA50: %.2f | "
+                "ATR: %.4f | StopSize: %.4f | "
                 "TREND15m Price: %.4f | "
                 "TREND15m SMA20: %.4f | "
                 "TREND15m SMA50: %.4f | "
@@ -844,6 +885,8 @@ class CryptoBot:
                     self.last_rsi,
                     self.sma1,
                     self.sma2,
+                    self.atr,
+                    self.stopSize,
                     self.trend_price,
                     self.trend_sma1,
                     self.trend_sma2,
@@ -904,6 +947,18 @@ class CryptoBot:
                     self.last_rsi,
                     self.sma1,
                     self.sma2,
+                )
+            )
+
+            print(
+                "  ATR(%d): %.4f - StopSize adattivo: "
+                "%.4f (pavimento: %.4f, x%.1f)"
+                % (
+                    self.atr_period,
+                    self.atr,
+                    self.stopSize,
+                    self.stop_floor,
+                    self.atr_mult,
                 )
             )
 
