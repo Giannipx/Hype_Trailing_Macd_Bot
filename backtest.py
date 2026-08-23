@@ -730,7 +730,10 @@ def main():
         )
         summary_rows.append(summary)
 
-        csv_path = os.path.join(OUTPUT_DIR, "trades_%s.csv" % tf)
+        # FIX: prima il nome era sempre "trades_<tf>.csv", quindi un run a
+        # 7 giorni e uno a 30 giorni sullo stesso timeframe si sovrascrivevano
+        # a vicenda. Il periodo ora fa parte del nome file.
+        csv_path = os.path.join(OUTPUT_DIR, "trades_%s_%dd.csv" % (tf, args.days))
         save_trades_csv(csv_path, result["trades"])
         print("Trade salvati in %s" % csv_path)
 
