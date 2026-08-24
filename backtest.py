@@ -543,7 +543,7 @@ def max_drawdown(equity_curve):
     return max_dd_usd, max_dd_pct
 
 
-def print_report(timeframe, days, result, start_cash, last_price, strategy_params):
+def print_report(timeframe, period_label, result, start_cash, last_price, strategy_params):
     wallet = result["wallet"]
     trades = result["trades"]
     equity_curve = result["equity_curve"]
@@ -561,7 +561,7 @@ def print_report(timeframe, days, result, start_cash, last_price, strategy_param
     dd_usd, dd_pct = max_drawdown(equity_curve)
 
     print("=" * 70)
-    print("BACKTEST %s | ultimi %d giorni" % (timeframe, days))
+    print("BACKTEST %s | periodo: %s" % (timeframe, period_label))
     print("=" * 70)
     print("Candele valutate:      %d" % len(equity_curve))
     print(
@@ -597,7 +597,7 @@ def print_report(timeframe, days, result, start_cash, last_price, strategy_param
     print("")
 
     return {
-        "timeframe": timeframe, "days": days,
+        "timeframe": timeframe, "period": period_label,
         "n_trades": len(trades), "n_buy": n_buy, "n_sell": n_sell, "n_hard_stop": n_hard_stop,
         "win_rate_pct": round(win_rate, 2),
         "realized_pnl_uscite_usd": round(wallet.realized_pnl_usd, 2),
@@ -657,7 +657,16 @@ def main():
     parser = argparse.ArgumentParser(description="Backtest offline HYPE Trailing MACD Bot")
     parser.add_argument("--file", default="hype.txt", help="File parametri del bot (default: hype.txt)")
     parser.add_argument("--symbol", default=None)
-    parser.add_argument("--days", type=int, default=30)
+    parser.add_argument("--days", type=int, default=30,
+                         help="Ultimi N giorni da adesso. Ignorato se si usano --start-date/--end-date.")
+    parser.add_argument("--start-date", default=None,
+                         help="Data inizio UTC (YYYY-MM-DD). Va usato insieme a --end-date per pinnare "
+                              "una finestra di calendario fissa, cosi' due run in momenti diversi (es. "
+                              "5m oggi, 15m domani) guardano ESATTAMENTE lo stesso storico e sono "
+                              "confrontabili. Senza questi due argomenti, --days calcola 'ultimi N "
+                              "giorni da adesso', che si sposta ad ogni esecuzione.")
+    parser.add_argument("--end-date", default=None,
+                         help="Data fine UTC (YYYY-MM-DD), esclusiva. Va usato insieme a --start-date.")
     parser.add_argument("--timeframes", default="1m,5m,15m")
     parser.add_argument("--perc-stable", type=float, default=None)
     parser.add_argument("--perc-coin", type=float, default=None)
@@ -704,14 +713,36 @@ def main():
         "interval": args.interval,
     }
 
+    if (args.start_date is None) != (args.end_date is None):
+        parser.error("--start-date e --end-date vanno usati insieme, non uno solo dei due")
+
+    if args.start_date is not None:
+        try:
+            start_dt = datetime.strptime(args.start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            end_dt = datetime.strptime(args.end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError as e:
+            parser.error("Formato data non valido, usa YYYY-MM-DD: %s" % e)
+        if end_dt <= start_dt:
+            parser.error("--end-date deve essere successiva a --start-date")
+        start_ms = int(start_dt.timestamp() * 1000)
+        end_ms = int(end_dt.timestamp() * 1000)
+        # Etichetta usata sia nei report a schermo sia nei nomi dei file di
+        # output: con date esplicite due run diversi (es. 5m e 15m) che
+        # usano la STESSA coppia --start-date/--end-date producono la
+        # STESSA etichetta, cosa che li rende confrontabili a colpo
+        # d'occhio - a differenza di "--days 30" dove l'etichetta è la
+        # stessa ma la finestra reale si sposta ad ogni esecuzione.
+        period_label = "%s_%s" % (args.start_date, args.end_date)
+    else:
+        end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        start_ms = int((datetime.now(timezone.utc) - timedelta(days=args.days)).timestamp() * 1000)
+        period_label = "%dd" % args.days
+
     timeframes = [t.strip() for t in args.timeframes.split(",") if t.strip()]
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     hl_util = Hyperliquid(real="n", market=args.symbol)  # solo per info/round_size/usd_to_size, nessuna chiave richiesta
-
-    end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ms = int((datetime.now(timezone.utc) - timedelta(days=args.days)).timestamp() * 1000)
 
     print("Scarico storico 15m (trend filter, condiviso da tutti i timeframe)...")
     trend_candles = hl_util.ohlcv_history(args.symbol, TREND_TIMEFRAME, start_ms, end_ms)
@@ -741,14 +772,16 @@ def main():
 
         last_price = candles[-1][4]
         summary = print_report(
-            tf, args.days, result, args.start_cash, last_price, strategy_params,
+            tf, period_label, result, args.start_cash, last_price, strategy_params,
         )
         summary_rows.append(summary)
 
-        # FIX: prima il nome era sempre "trades_<tf>.csv", quindi un run a
-        # 7 giorni e uno a 30 giorni sullo stesso timeframe si sovrascrivevano
-        # a vicenda. Il periodo ora fa parte del nome file.
-        csv_path = os.path.join(OUTPUT_DIR, "trades_%s_%dd.csv" % (tf, args.days))
+        # FIX: prima il nome era sempre "trades_<tf>.csv" (poi "trades_<tf>_<N>d.csv"),
+        # quindi due run con --days che si spostano nel tempo o con finestre
+        # diverse potevano sovrascriversi o essere difficili da confrontare.
+        # period_label distingue sia "--days N" sia le finestre pinnate con
+        # --start-date/--end-date.
+        csv_path = os.path.join(OUTPUT_DIR, "trades_%s_%s.csv" % (tf, period_label))
         save_trades_csv(csv_path, result["trades"])
         print("Trade salvati in %s" % csv_path)
 
@@ -779,7 +812,7 @@ def main():
                 )
             )
 
-        summary_path = os.path.join(OUTPUT_DIR, "summary.csv")
+        summary_path = os.path.join(OUTPUT_DIR, "summary_%s.csv" % period_label)
         with open(summary_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))
             writer.writeheader()
