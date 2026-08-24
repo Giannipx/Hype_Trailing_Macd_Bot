@@ -25,7 +25,10 @@ class CryptoBot:
     # Non serve modificare config.py per questi tre parametri.
     MAX_POSITION_PCT = 0.50       # max 50% dell'equity in HYPE
     MAX_BUY_ENTRIES = 2           # max 2 BUY per ciclo di posizione
-    MAX_LOSS_PCT = 0.01           # hard stop: -1% dal prezzo medio
+    MAX_LOSS_PCT = 0.01           # hard stop: pavimento percentuale (usato solo se l'ATR è più stretto)
+    HARD_STOP_ATR_MULT = 4.0      # hard stop dinamico: ATR * questo moltiplicatore (deve restare più largo
+                                   # del trailing stop, che di norma usa atr_mult ~1.5-2.5x: l'hard stop è
+                                   # una rete di sicurezza rara, non l'uscita primaria della strategia)
 
     def __init__(
         self,
@@ -46,6 +49,7 @@ class CryptoBot:
         atr_period=14,
         atr_mult=1.5,
         max_loss_pct=None,
+        hard_stop_atr_mult=None,
     ):
         # Wallet / ordini
         self.wallet_binance = Hyperliquid(
@@ -86,6 +90,11 @@ class CryptoBot:
             self.MAX_LOSS_PCT
             if max_loss_pct is None
             else max_loss_pct
+        )
+        self.hard_stop_atr_mult = (
+            self.HARD_STOP_ATR_MULT
+            if hard_stop_atr_mult is None
+            else hard_stop_atr_mult
         )
 
         self.interval = interval
@@ -396,10 +405,29 @@ class CryptoBot:
 
     def check_hard_stop(self):
         """
-        Chiude tutta la posizione se il prezzo scende di max_loss_pct
-        sotto il prezzo medio di carico.
+        Chiude tutta la posizione se il prezzo scende troppo sotto il
+        prezzo medio di carico.
 
-        Questo stop è indipendente dal MACD e dal trailing.
+        FIX: prima la distanza era una percentuale fissa (max_loss_pct,
+        es. 1% o 3%) uguale su qualunque timeframe. Ma l'escursione di
+        prezzo "normale" per candela è molto diversa tra 1m/5m/15m: la
+        stessa percentuale fissa può essere larghissima su un timeframe
+        (praticamente mai toccata) e strettissima su un altro (scatta
+        sul rumore normale, prima che il segnale MACD abbia la
+        possibilità di chiudere la posizione da solo) - è quello che
+        abbiamo osservato confrontando 1m/5m/15m con MAX_LOSS_PCT=0.03
+        fisso: win rate molto diverso non solo per qualità del segnale,
+        ma anche per quanto quel 3% fosse permissivo su ciascun
+        timeframe.
+
+        Ora la distanza è in dollari: max(pavimento percentuale su
+        max_loss_pct, ATR * hard_stop_atr_mult). Il pavimento evita uno
+        stop irrealisticamente stretto quando l'ATR crolla (mercato
+        piatto); hard_stop_atr_mult (default 4x, più largo del
+        moltiplicatore usato per il trailing stop) fa sì che l'hard stop
+        resti una rete di sicurezza rara che si allarga con la
+        volatilità reale, invece di una soglia fissa che il rumore
+        normale del timeframe può toccare spesso.
         """
 
         if self.cryptoCoin <= 0:
@@ -408,10 +436,10 @@ class CryptoBot:
         if self.priceMin <= 0:
             return False
 
-        stop_price = (
-            self.priceMin
-            * (1.0 - self.max_loss_pct)
-        )
+        floor_distance = self.priceMin * self.max_loss_pct
+        atr_distance = (self.atr or 0) * self.hard_stop_atr_mult
+        stop_distance = max(floor_distance, atr_distance)
+        stop_price = self.priceMin - stop_distance
 
         if self.price > stop_price:
             return False
@@ -428,10 +456,13 @@ class CryptoBot:
             % self.price
         )
         print(
-            "Stop:              %.4f (-%.2f%%)"
+            "Stop:              %.4f (-$%.4f, pavimento %.2f%%, ATR x%.1f: $%.4f)"
             % (
                 stop_price,
+                stop_distance,
                 self.max_loss_pct * 100,
+                self.hard_stop_atr_mult,
+                atr_distance,
             )
         )
         print(

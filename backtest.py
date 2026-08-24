@@ -323,6 +323,7 @@ def simulate_trail(candles, start_idx, kind, stopsize, perc_stable, perc_coin,
 def run_backtest(candles, trend_candles, symbol, hl_util,
                   perc_stable, perc_coin, stop_floor, multi_size,
                   atr_period, atr_mult, stoplossorder, max_loss_pct,
+                  hard_stop_atr_mult,
                   start_cash=1000.0):
     trend_close_times = [c[6] for c in trend_candles]
 
@@ -387,7 +388,15 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
                 i += 1
                 continue
 
-            stop_price = price_min * (1.0 - max_loss_pct)
+            # FIX: prima stop_price era una % fissa (max_loss_pct) del
+            # prezzo medio, uguale su qualunque timeframe - vedi la nota
+            # dettagliata in botMacd.py check_hard_stop(). Ora è una
+            # distanza in dollari: max(pavimento %, ATR*hard_stop_atr_mult),
+            # esattamente come il trailing stop_size sopra.
+            hard_stop_floor = price_min * max_loss_pct
+            hard_stop_atr_distance = atr_value * hard_stop_atr_mult
+            hard_stop_distance = max(hard_stop_floor, hard_stop_atr_distance)
+            stop_price = price_min - hard_stop_distance
             stop_fill = next(
                 (p for p in intrabar_path(candles[i]) if p <= stop_price),
                 None,
@@ -557,8 +566,8 @@ def print_report(timeframe, days, result, start_cash, last_price, strategy_param
     print("Candele valutate:      %d" % len(equity_curve))
     print(
         "Parametri: STOPSIZE $%.2f | ATR %dx%.2f | MSIZE %.2f | "
-        "PERC_STABLE %.2f | PERC_COIN %.2f | MAX_LOSS %.2f%% | "
-        "STOPLOSS %s | INTERVAL %gs"
+        "PERC_STABLE %.2f | PERC_COIN %.2f | MAX_LOSS pavimento %.2f%% "
+        "(dinamico ATRx%.1f) | STOPLOSS %s | INTERVAL %gs"
         % (
             strategy_params["stop_floor"],
             strategy_params["atr_period"],
@@ -567,6 +576,7 @@ def print_report(timeframe, days, result, start_cash, last_price, strategy_param
             strategy_params["perc_stable"],
             strategy_params["perc_coin"],
             strategy_params["max_loss_pct"] * 100,
+            strategy_params["hard_stop_atr_mult"],
             strategy_params["stoploss"],
             strategy_params["interval"],
         )
@@ -603,6 +613,7 @@ def print_report(timeframe, days, result, start_cash, last_price, strategy_param
         "perc_stable": strategy_params["perc_stable"],
         "perc_coin": strategy_params["perc_coin"],
         "max_loss_pct": strategy_params["max_loss_pct"],
+        "hard_stop_atr_mult": strategy_params["hard_stop_atr_mult"],
         "stoploss": strategy_params["stoploss"],
         "interval": strategy_params["interval"],
     }
@@ -655,6 +666,7 @@ def main():
     parser.add_argument("--atr-period", type=int, default=None)
     parser.add_argument("--atr-mult", type=float, default=None)
     parser.add_argument("--max-loss-pct", type=float, default=None)
+    parser.add_argument("--hard-stop-atr-mult", type=float, default=None)
     parser.add_argument("--stoploss", choices=("y", "n"), default=None)
     parser.add_argument("--start-cash", type=float, default=None)
     args = parser.parse_args()
@@ -674,6 +686,7 @@ def main():
     args.max_loss_pct = param_value(args.max_loss_pct, params, "MAX_LOSS_PCT", 0.01, float)
     if not 0 < args.max_loss_pct < 1:
         parser.error("MAX_LOSS_PCT deve essere una frazione tra 0 e 1 (es. 0.01 = 1%)")
+    args.hard_stop_atr_mult = param_value(args.hard_stop_atr_mult, params, "HARD_STOP_ATR_MULT", 4.0, float)
     args.stoploss = param_value(args.stoploss, params, "STOPLOSS", "n", str).lower()
     args.interval = param_value(None, params, "INTERVAL", 4, float)
     args.start_cash = config.START_BALANCE_USD if args.start_cash is None else args.start_cash
@@ -686,6 +699,7 @@ def main():
         "perc_stable": args.perc_stable,
         "perc_coin": args.perc_coin,
         "max_loss_pct": args.max_loss_pct,
+        "hard_stop_atr_mult": args.hard_stop_atr_mult,
         "stoploss": args.stoploss,
         "interval": args.interval,
     }
@@ -721,6 +735,7 @@ def main():
             candles, trend_candles, args.symbol, hl_util,
             args.perc_stable, args.perc_coin, args.stop_floor, args.multi_size,
             args.atr_period, args.atr_mult, args.stoploss, args.max_loss_pct,
+            args.hard_stop_atr_mult,
             start_cash=args.start_cash,
         )
 
@@ -742,23 +757,24 @@ def main():
         print("RIEPILOGO COMPARATIVO")
         print("=" * 70)
         header = (
-            "%-6s %7s %8s %11s %8s %11s %8s | %5s %7s %5s %7s %7s %7s %3s %4s"
+            "%-6s %7s %8s %11s %8s %11s %8s | %5s %7s %5s %7s %7s %7s %5s %3s %4s"
             % (
                 "TF", "Trade", "WinRate%", "PnL usc.$", "Fee$", "Rendim.%", "MaxDD%",
-                "Stop", "ATR", "MSIZE", "PStable", "PCoin", "MaxLoss", "SL", "Int",
+                "Stop", "ATR", "MSIZE", "PStable", "PCoin", "MaxLoss", "HSAtr", "SL", "Int",
             )
         )
         print(header)
         for s in summary_rows:
             print(
                 "%-6s %7d %8.1f %11.2f %8.2f %11.2f %8.2f | "
-                "%5.2f %2dx%-4.2f %5.2f %7.2f %7.2f %7.2f %2s %4.0f"
+                "%5.2f %2dx%-4.2f %5.2f %7.2f %7.2f %7.2f %4.1fx %2s %4.0f"
                 % (
                     s["timeframe"], s["n_trades"], s["win_rate_pct"],
                     s["realized_pnl_uscite_usd"], s["fees_usd"],
                     s["total_return_pct"], s["max_drawdown_pct"],
                     s["stopsize"], s["atr_period"], s["atr_mult"],
                     s["msize"], s["perc_stable"], s["perc_coin"], s["max_loss_pct"] * 100,
+                    s["hard_stop_atr_mult"],
                     s["stoploss"], s["interval"],
                 )
             )

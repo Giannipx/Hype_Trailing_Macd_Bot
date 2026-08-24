@@ -31,8 +31,14 @@ def main(options):
     if not 0 < max_loss_pct < 1:
         raise ValueError('MAX_LOSS_PCT deve essere una frazione tra 0 e 1 (es. 0.01 = 1%)')
 
+    # Hard stop dinamico via ATR: distanza = max(priceMin*max_loss_pct, ATR*hard_stop_atr_mult).
+    # max_loss_pct diventa quindi un PAVIMENTO percentuale, non più il valore
+    # diretto - stessa logica già usata per STOPSIZE/atr_mult sul trailing.
+    hard_stop_atr_mult = float(myObject.get('HARD_STOP_ATR_MULT', 4.0))
+
     bot = CryptoBot(symbol, stopSize, interval, timeframe, multiSize, percStable, percCoin, real, stoplossorder,
-                     atr_period=atr_period, atr_mult=atr_mult, max_loss_pct=max_loss_pct)
+                     atr_period=atr_period, atr_mult=atr_mult, max_loss_pct=max_loss_pct,
+                     hard_stop_atr_mult=hard_stop_atr_mult)
     bot.run()
 
 if __name__ == "__main__":
