@@ -120,6 +120,7 @@ class CryptoBot:
         self.trend_sma2 = None
         self.trend_price = None
         self.trend_bullish = False
+        self._prev_trend_bullish = False
 
         # Trailing
         self.trailBuy = False
@@ -910,6 +911,108 @@ class CryptoBot:
                 continue
 
             # --------------------------------------------------
+            # TREND FLIP EXIT: chiudi posizione se trend 15m gira bearish
+            # --------------------------------------------------
+            if self.cryptoCoin > 0:
+                if self._prev_trend_bullish and not self.trend_bullish:
+                    print("")
+                    print("=" * 60)
+                    print("!!! TREND FLIP BEARISH - CHIUSURA POSIZIONE !!!")
+                    print(
+                        "Trend 15m: Price %.4f | SMA20 %.4f | SMA50 %.4f"
+                        % (
+                            self.trend_price,
+                            self.trend_sma1,
+                            self.trend_sma2,
+                        )
+                    )
+                    print(
+                        "Posizione: %.4f %s @ entry %.4f"
+                        % (
+                            self.cryptoCoin,
+                            self.cryptoName,
+                            self.priceMin,
+                        )
+                    )
+                    print("=" * 60)
+
+                    try:
+                        if (
+                            self.real == "y"
+                            and self.stoplossorder == "y"
+                        ):
+                            try:
+                                self.wallet_binance.elimina_ordine(
+                                    self.market
+                                )
+                            except Exception as e:
+                                print(
+                                    "Avviso cancellazione SL: %s"
+                                    % e
+                                )
+
+                        amount = self.wallet_binance.round_size(
+                            self.market.split("/")[0],
+                            self.cryptoCoin,
+                        )
+
+                        if amount > 0:
+                            result = self.wallet_binance.sell(
+                                self.market,
+                                amount,
+                                self.price,
+                            )
+
+                            if not result.get("filled", False):
+                                print(
+                                    "TREND FLIP EXIT NON ESEGUITO: %s"
+                                    % result.get("error")
+                                )
+                                self.data_binance.cronoMacdString(
+                                    "TREND FLIP EXIT NON ESEGUITO",
+                                    result.get("error"),
+                                )
+                            else:
+                                fill_price = result.get(
+                                    "fill_price",
+                                    self.price,
+                                )
+                                pnl = result.get("pnl", 0.0)
+                                fee = result.get("fee", 0.0)
+                                self.data_binance.cronoMacdString(
+                                    "TREND FLIP EXIT | Entry %.4f | "
+                                    "Fill %.4f | PnL %.4f | Fee %.4f"
+                                    % (
+                                        self.priceMin,
+                                        fill_price,
+                                        pnl,
+                                        fee,
+                                    )
+                                )
+                                print(
+                                    "TREND FLIP EXIT ESEGUITO | Fill %.4f | "
+                                    "PnL %.4f | Fee %.4f"
+                                    % (
+                                        fill_price,
+                                        pnl,
+                                        fee,
+                                    )
+                                )
+
+                        self.buy_entries = 0
+                        self.buy_armed = True
+                        self.previous_histogram = None
+                        self.wallet()
+
+                    except Exception as e:
+                        print("Errore TREND FLIP EXIT: %s" % e)
+                        self.data_binance.cronoMacdString(
+                            "ERRORE TREND FLIP EXIT", str(e)
+                        )
+
+            self._prev_trend_bullish = self.trend_bullish
+
+            # --------------------------------------------------
             # LOG
             # --------------------------------------------------
 
@@ -1246,7 +1349,7 @@ class CryptoBot:
                         "[ok]"
                     )
 
-                    if self.last_rsi < 60:
+                    if self.last_rsi < 55:
 
                         print(
                             "RSI negativo [ok]"
