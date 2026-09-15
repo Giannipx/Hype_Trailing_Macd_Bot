@@ -55,8 +55,9 @@ class StopTrail:
             # Se il prezzo diminuisce e supera in diminuzione lo stoploss allora vendo
             elif self.price <= self.stoploss:
                 print("Prezzo inferiore allo stop loss - vendo [ok]")
-                if self.price > self.priceMin:
-                    print("Prezzo di vendita superiore al prezzo medio d'acquisto [ok]")
+                # Vincolo sul prezzo d'acquisto rimosso per permettere vendite in perdita
+                if True:
+                    print("Vincolo prezzo d'acquisto rimosso, vendo. [ok]")
                     if self.stoplossorder == "y":
                         self.wallet_binance.elimina_ordine(self.market)
 
@@ -110,11 +111,6 @@ class StopTrail:
                     self.data_binance.cronoTradeMacd(now, "SELL", self.market, coinSell, fill_price)
 
                     print("Torno a MACD")
-
-                else:
-                    print("prezzo minimo non superato [no]")
-                    self.type = "sell"
-                    self.running = True
 
         # buy------------------------------
         elif self.type == "buy":

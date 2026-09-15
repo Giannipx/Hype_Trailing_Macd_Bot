@@ -1259,13 +1259,11 @@ class CryptoBot:
                                 "Wallet Crypto [ok]"
                             )
 
-                            if (
-                                self.price
-                                - self.stopSize
-                            ) > self.priceMin:
+                            # Vincolo rimosso: vendiamo anche in perdita se c'è segnale MACD
+                            if True:
 
                                 print(
-                                    "Prezzo medio superato [ok]"
+                                    "Vincolo prezzo medio rimosso [ok]"
                                 )
 
                                 if self.trailSell:
@@ -1312,10 +1310,6 @@ class CryptoBot:
                                         "trailSell False"
                                     )
 
-                            else:
-                                print(
-                                    "Prezzo medio non superato"
-                                )
 
                         else:
                             print("zero coin")
@@ -1593,12 +1587,8 @@ class CryptoBot:
             )
         )
 
-        # SELL trailing disponibile solo sopra
-        # il prezzo medio.
-        if (
-            self.price > self.priceMin
-            and self.cryptoCoin > 0
-        ):
+        # SELL trailing disponibile se abbiamo coin (anche in perdita)
+        if self.cryptoCoin > 0:
             self.trailSell = True
         else:
             self.trailSell = False
