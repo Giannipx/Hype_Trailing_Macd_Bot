@@ -100,3 +100,91 @@ def sma(closes, period):
     if len(closes) < period:
         return None
     return sum(closes[-period:]) / period
+
+
+def ema(closes, period):
+    """Ultima EMA sul periodo. None se dati insufficienti."""
+    if len(closes) < period:
+        return None
+    return _ema_series(closes, period)[-1]
+
+
+def adx(candles, period=14):
+    """Average Directional Index (ADX).
+    candles: lista di [timestamp, open, high, low, close, volume]
+    Ritorna l'ultimo valore ADX, o None se i dati sono insufficienti.
+    """
+    if len(candles) < period * 2:
+        return None
+
+    true_ranges = []
+    plus_dms = []
+    minus_dms = []
+
+    for i in range(1, len(candles)):
+        high = candles[i][2]
+        low = candles[i][3]
+        prev_high = candles[i - 1][2]
+        prev_low = candles[i - 1][3]
+        prev_close = candles[i - 1][4]
+
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        
+        plus_dm = high - prev_high
+        minus_dm = prev_low - low
+        
+        if plus_dm < 0: plus_dm = 0
+        if minus_dm < 0: minus_dm = 0
+        
+        if plus_dm > minus_dm:
+            minus_dm = 0
+        elif minus_dm > plus_dm:
+            plus_dm = 0
+        else:
+            plus_dm = 0
+            minus_dm = 0
+
+        true_ranges.append(tr)
+        plus_dms.append(plus_dm)
+        minus_dms.append(minus_dm)
+
+    if len(true_ranges) < period * 2 - 1:
+        return None
+
+    # Wilder's smoothing function
+    def wilder_smooth(values, p):
+        smoothed = sum(values[:p])
+        res = [smoothed]
+        for val in values[p:]:
+            smoothed = smoothed - (smoothed / p) + val
+            res.append(smoothed)
+        return res
+
+    smoothed_tr = wilder_smooth(true_ranges, period)
+    smoothed_plus = wilder_smooth(plus_dms, period)
+    smoothed_minus = wilder_smooth(minus_dms, period)
+
+    dx_list = []
+    for tr, p, m in zip(smoothed_tr, smoothed_plus, smoothed_minus):
+        if tr == 0:
+            plus_di = 0.0
+            minus_di = 0.0
+        else:
+            plus_di = 100.0 * (p / tr)
+            minus_di = 100.0 * (m / tr)
+            
+        di_sum = plus_di + minus_di
+        if di_sum == 0:
+            dx = 0.0
+        else:
+            dx = 100.0 * abs(plus_di - minus_di) / di_sum
+        dx_list.append(dx)
+
+    if len(dx_list) < period:
+        return None
+
+    adx_val = sum(dx_list[:period]) / period
+    for dx in dx_list[period:]:
+        adx_val = ((adx_val * (period - 1)) + dx) / period
+
+    return adx_val

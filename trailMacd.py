@@ -9,7 +9,7 @@ from hl import Hyperliquid
 # reale via market_open/market_close).
 
 class StopTrail:
-    def __init__(self, market, type, stopsize, interval, multiSize, percStable, percCoin, real, stoplossorder,
+    def __init__(self, market, type, stopsize, interval, multiSize, stableBuyUsd, percCoin, real, stoplossorder,
                  wallet_instance=None, data_instance=None):
         # FIX: le istanze Hyperliquid vengono condivise con quelle di CryptoBot
         # invece di crearne di nuove ad ogni trade. Prima se ne aprivano 2 qui +
@@ -26,7 +26,7 @@ class StopTrail:
         self.stopsize = stopsize
         self.interval = interval
         self.multiSize = multiSize
-        self.percStable = percStable
+        self.stableBuyUsd = stableBuyUsd
         self.percCoin = percCoin
         self.real = real
         self.stoplossorder = stoplossorder
@@ -237,7 +237,7 @@ class StopTrail:
             self.cryptoCoinOrder = self.wallet_binance.get_balance_order(self.cryptoName)
             self.cryptoCoinTotali = round(self.cryptoCoin + self.cryptoCoinOrder, 2)
 
-        self.stableBot = round(self.stableCoin * self.percStable, 2)
+        self.stableBot = self.stableBuyUsd
         self.coinBot = round(self.cryptoCoin * self.percCoin, 2)
 
         # FIX: stessa correzione di botMacd.py — get_entry_price() invece di

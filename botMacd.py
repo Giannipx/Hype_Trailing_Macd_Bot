@@ -117,7 +117,8 @@ class CryptoBot:
 
         # Trend timeframe superiore
         self.trend_sma1 = None
-        self.trend_sma2 = None
+        self.trend_ema200 = None
+        self.trend_adx = None
         self.trend_price = None
         self.trend_bullish = False
         self._prev_trend_bullish = False
@@ -125,6 +126,7 @@ class CryptoBot:
         # Trailing
         self.trailBuy = False
         self.trailSell = False
+        self.take_profit_hit = False
 
         # Wallet
         self.walletType = "Null"
@@ -351,16 +353,12 @@ class CryptoBot:
         trend_ohlcv = self.data_binance.ohlcv_data(
             self.market,
             self.trend_timeframe,
-            limit=self.limit,
+            limit=300,
         )
 
         trend_closes = [c[4] for c in trend_ohlcv]
 
-        min_required = max(
-            self.sma1_period,
-            self.sma2_period,
-            50,
-        )
+        min_required = 200
 
         if len(trend_closes) < min_required:
             raise ValueError(
@@ -378,24 +376,30 @@ class CryptoBot:
             self.sma1_period,
         )
 
-        trend_sma2 = indicators.sma(
+        trend_ema200 = indicators.ema(
             trend_closes,
-            self.sma2_period,
+            200,
+        )
+        
+        trend_adx = indicators.adx(
+            trend_ohlcv,
+            14,
         )
 
-        if trend_sma1 is None or trend_sma2 is None:
+        if trend_sma1 is None or trend_ema200 is None or trend_adx is None:
             raise ValueError(
-                "SMA trend non calcolabili sul timeframe %s"
+                "Indicatori trend non calcolabili sul timeframe %s"
                 % self.trend_timeframe
             )
 
         self.trend_price = trend_closes[-1]
         self.trend_sma1 = trend_sma1
-        self.trend_sma2 = trend_sma2
+        self.trend_ema200 = trend_ema200
+        self.trend_adx = trend_adx
 
         self.trend_bullish = (
-            self.trend_price > self.trend_sma2
-            and self.trend_sma1 > self.trend_sma2
+            self.trend_price > self.trend_ema200
+            and self.trend_adx > 25
         )
 
         return self.trend_bullish
@@ -437,9 +441,14 @@ class CryptoBot:
         if self.priceMin <= 0:
             return False
 
-        floor_distance = self.priceMin * self.max_loss_pct
-        atr_distance = (self.atr or 0) * self.hard_stop_atr_mult
-        stop_distance = max(floor_distance, atr_distance)
+        if self.take_profit_hit:
+            # Sposta l'hard stop a break-even (prezzo di ingresso + piccolo margine)
+            stop_distance = - (self.priceMin * 0.002) 
+        else:
+            floor_distance = self.priceMin * getattr(self, 'max_loss_pct', 0.01)
+            atr_distance = (self.atr or 0) * getattr(self, 'hard_stop_atr_mult', 4.0)
+            stop_distance = max(floor_distance, atr_distance)
+            
         stop_price = self.priceMin - stop_distance
 
         if self.price > stop_price:
@@ -574,6 +583,58 @@ class CryptoBot:
             )
 
             return False
+
+    # ==========================================================
+    # TAKE PROFIT PARZIALE
+    # ==========================================================
+
+    def check_take_profit(self):
+        if self.cryptoCoin <= 0 or self.priceMin <= 0:
+            self.take_profit_hit = False
+            return False
+            
+        if self.take_profit_hit:
+            return False
+            
+        # Target: 1.5x ATR distance dal prezzo di ingresso
+        tp_distance = (self.atr or 0) * 1.5 
+        tp_price = self.priceMin + tp_distance
+        
+        if self.price >= tp_price and tp_distance > 0:
+            print("")
+            print("=" * 60)
+            print("!!! TAKE PROFIT PARZIALE (1.5x ATR) !!!")
+            print("Prezzo medio:      %.4f" % self.priceMin)
+            print("Prezzo corrente:   %.4f" % self.price)
+            print("Target:            %.4f (+%.4f)" % (tp_price, tp_distance))
+            print("=" * 60)
+            
+            sell_amount = round(self.cryptoCoin * 0.5, 4) # Vende il 50%
+            if sell_amount <= 0:
+                return False
+                
+            try:
+                if self.real == "y" and self.stoplossorder == "y":
+                    try:
+                        self.wallet_binance.elimina_ordine(self.market)
+                    except Exception as e:
+                        pass
+                
+                result = self.wallet_binance.sell(self.market, sell_amount, self.price)
+                if result.get("filled", False):
+                    self.take_profit_hit = True
+                    fill_price = result.get("fill_price", self.price)
+                    pnl = result.get("pnl", 0.0)
+                    self.data_binance.cronoMacdString(
+                        "TAKE PROFIT PARZIALE 50%% | Fill %.4f | PnL %.4f" % (fill_price, pnl)
+                    )
+                    self.wallet()
+                    return True
+                else:
+                    print("TAKE PROFIT NON ESEGUITO: %s" % result.get("error"))
+            except Exception as e:
+                print("Errore TAKE PROFIT: %s" % e)
+        return False
 
     # ==========================================================
     # BUY RISK FILTER
@@ -909,6 +970,13 @@ class CryptoBot:
 
             if self.check_hard_stop():
                 continue
+                
+            # --------------------------------------------------
+            # TAKE PROFIT
+            # --------------------------------------------------
+
+            if self.check_take_profit():
+                continue
 
             # --------------------------------------------------
             # TREND FLIP EXIT: chiudi posizione se trend 15m gira bearish
@@ -919,11 +987,12 @@ class CryptoBot:
                     print("=" * 60)
                     print("!!! TREND FLIP BEARISH - CHIUSURA POSIZIONE !!!")
                     print(
-                        "Trend 15m: Price %.4f | SMA20 %.4f | SMA50 %.4f"
+                        "Trend 15m: Price %.4f | SMA20 %.4f | EMA200 %.4f | ADX %.1f"
                         % (
                             self.trend_price,
                             self.trend_sma1,
-                            self.trend_sma2,
+                            self.trend_ema200,
+                            self.trend_adx,
                         )
                     )
                     print(
@@ -1024,7 +1093,8 @@ class CryptoBot:
                 "ATR: %.4f | StopSize: %.4f | "
                 "TREND15m Price: %.4f | "
                 "TREND15m SMA20: %.4f | "
-                "TREND15m SMA50: %.4f | "
+                "TREND15m EMA200: %.4f | "
+                "TREND15m ADX: %.1f | "
                 "TREND15m Bullish: %s | "
                 "%s: %.2f | %s: %.4f | "
                 "trailBuy: %s | trailSell: %s | "
@@ -1042,7 +1112,8 @@ class CryptoBot:
                     self.stopSize,
                     self.trend_price,
                     self.trend_sma1,
-                    self.trend_sma2,
+                    self.trend_ema200,
+                    self.trend_adx,
                     self.trend_bullish,
                     self.stableName,
                     self.stableCoin,
@@ -1376,10 +1447,18 @@ class CryptoBot:
                             )
 
                             print(
-                                "  SMA50 %s: %.4f"
+                                "  EMA200 %s: %.4f"
                                 % (
                                     self.trend_timeframe,
-                                    self.trend_sma2,
+                                    self.trend_ema200,
+                                )
+                            )
+
+                            print(
+                                "  ADX %s: %.1f"
+                                % (
+                                    self.trend_timeframe,
+                                    self.trend_adx,
                                 )
                             )
 
@@ -1387,12 +1466,13 @@ class CryptoBot:
                                 "BUY BLOCCATO | "
                                 "Trend %s non bullish | "
                                 "Price %.4f | SMA20 %.4f | "
-                                "SMA50 %.4f"
+                                "EMA200 %.4f | ADX %.1f"
                                 % (
                                     self.trend_timeframe,
                                     self.trend_price,
                                     self.trend_sma1,
-                                    self.trend_sma2,
+                                    self.trend_ema200,
+                                    self.trend_adx,
                                 )
                             )
 
@@ -1427,7 +1507,7 @@ class CryptoBot:
                                     self.stopSize,
                                     self.interval,
                                     self.multiSize,
-                                    self.percStable,
+                                    self.stableBot,
                                     self.percCoin,
                                     self.real,
                                     self.stoplossorder,
@@ -1566,11 +1646,29 @@ class CryptoBot:
                 )
             )
 
-        self.stableBot = round(
-            self.stableCoin
-            * self.percStable,
-            2,
-        )
+        # Position Sizing Dinamico basato sul rischio all'Hard Stop
+        if hasattr(self, 'price') and hasattr(self, 'atr') and hasattr(self, 'max_loss_pct'):
+            equity = self.stableCoin + (self.cryptoCoin * self.price)
+            risk_amount_usd = equity * self.max_loss_pct
+            
+            atr_dist = (self.atr or 0) * self.hard_stop_atr_mult
+            floor_dist = self.price * self.max_loss_pct
+            stop_dist = max(floor_dist, atr_dist)
+            
+            if stop_dist > 0:
+                coins = risk_amount_usd / stop_dist
+                target_usd = coins * self.price
+                
+                max_allowed = self.stableCoin * 0.95
+                max_position_limit = equity * getattr(self, 'MAX_POSITION_PCT', 0.50)
+                current_position_value = (self.cryptoCoin * self.price) if self.cryptoCoin > 0 else 0
+                remaining_allowance = max(0, max_position_limit - current_position_value)
+
+                self.stableBot = round(min(target_usd, max_allowed, remaining_allowance), 2)
+            else:
+                self.stableBot = round(self.stableCoin * self.percStable, 2)
+        else:
+            self.stableBot = round(self.stableCoin * self.percStable, 2)
 
         self.coinBot = round(
             self.cryptoCoin
@@ -1592,6 +1690,7 @@ class CryptoBot:
             self.trailSell = True
         else:
             self.trailSell = False
+            self.take_profit_hit = False
 
         # BUY trailing disponibile se abbiamo
         # almeno 10 USDC investibili.
