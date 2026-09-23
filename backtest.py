@@ -163,7 +163,7 @@ def compute_cycle_indicators(window_candles, atr_period):
     }
 
 
-def trend_bullish_at(trend_candles, trend_close_times, as_of_ms):
+def trend_bullish_at(trend_candles, trend_close_times, as_of_ms, adx_threshold=20.0):
     """Stesso identico calcolo di calculate_trend_filter() in botMacd.py,
     ma allineato nel tempo: prende solo le candele 15m già chiuse "as of"
     il momento simulato (as_of_ms), esattamente come farebbe una fetch live
@@ -185,7 +185,7 @@ def trend_bullish_at(trend_candles, trend_close_times, as_of_ms):
         return None, None
 
     trend_price = closes[-1]
-    bullish = trend_price > ema200 and adx_val > 25
+    bullish = trend_price > ema200 and adx_val >= adx_threshold
     return bullish, {"price": trend_price, "sma1": sma1, "ema200": ema200, "adx": adx_val}
 
 
@@ -323,7 +323,7 @@ def simulate_trail(candles, start_idx, kind, stopsize, stableBotUsd, perc_coin,
 def run_backtest(candles, trend_candles, symbol, hl_util,
                   perc_stable, perc_coin, stop_floor, multi_size,
                   atr_period, atr_mult, stoplossorder, max_loss_pct,
-                  hard_stop_atr_mult,
+                  hard_stop_atr_mult, adx_threshold=20.0,
                   start_cash=1000.0):
     trend_close_times = [c[6] for c in trend_candles]
 
@@ -355,7 +355,7 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
         atr_value = ind["atr"]
         stop_size = round(max(stop_floor, atr_value * atr_mult), 4)
 
-        trend_ok, _trend_info = trend_bullish_at(trend_candles, trend_close_times, close_time_i)
+        trend_ok, _trend_info = trend_bullish_at(trend_candles, trend_close_times, close_time_i, adx_threshold)
         if trend_ok is None:
             i += 1
             continue
@@ -658,6 +658,7 @@ def print_report(timeframe, period_label, result, start_cash, last_price, strate
         "hard_stop_atr_mult": strategy_params["hard_stop_atr_mult"],
         "stoploss": strategy_params["stoploss"],
         "interval": strategy_params["interval"],
+        "adx_threshold": strategy_params.get("adx_threshold", 20.0),
     }
 
 
@@ -719,6 +720,7 @@ def main():
     parser.add_argument("--max-loss-pct", type=float, default=None)
     parser.add_argument("--hard-stop-atr-mult", type=float, default=None)
     parser.add_argument("--stoploss", choices=("y", "n"), default=None)
+    parser.add_argument("--adx-threshold", type=float, default=None)
     parser.add_argument("--start-cash", type=float, default=None)
     args = parser.parse_args()
 
@@ -738,6 +740,7 @@ def main():
     if not 0 < args.max_loss_pct < 1:
         parser.error("MAX_LOSS_PCT deve essere una frazione tra 0 e 1 (es. 0.01 = 1%)")
     args.hard_stop_atr_mult = param_value(args.hard_stop_atr_mult, params, "HARD_STOP_ATR_MULT", 4.0, float)
+    args.adx_threshold = param_value(args.adx_threshold, params, "ADX_THRESHOLD", 20.0, float)
     args.stoploss = param_value(args.stoploss, params, "STOPLOSS", "n", str).lower()
     args.interval = param_value(None, params, "INTERVAL", 4, float)
     args.start_cash = config.START_BALANCE_USD if args.start_cash is None else args.start_cash
@@ -751,6 +754,7 @@ def main():
         "perc_coin": args.perc_coin,
         "max_loss_pct": args.max_loss_pct,
         "hard_stop_atr_mult": args.hard_stop_atr_mult,
+        "adx_threshold": args.adx_threshold,
         "stoploss": args.stoploss,
         "interval": args.interval,
     }
@@ -808,7 +812,7 @@ def main():
             candles, trend_candles, args.symbol, hl_util,
             args.perc_stable, args.perc_coin, args.stop_floor, args.multi_size,
             args.atr_period, args.atr_mult, args.stoploss, args.max_loss_pct,
-            args.hard_stop_atr_mult,
+            args.hard_stop_atr_mult, adx_threshold=args.adx_threshold,
             start_cash=args.start_cash,
         )
 

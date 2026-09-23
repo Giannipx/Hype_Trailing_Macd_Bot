@@ -50,6 +50,7 @@ class CryptoBot:
         atr_mult=1.5,
         max_loss_pct=None,
         hard_stop_atr_mult=None,
+        adx_threshold=20.0,
     ):
         # Wallet / ordini
         self.wallet_binance = Hyperliquid(
@@ -116,12 +117,15 @@ class CryptoBot:
         self.sma2 = None
 
         # Trend timeframe superiore
+        self.adx_threshold = float(adx_threshold)
         self.trend_sma1 = None
         self.trend_ema200 = None
         self.trend_adx = None
         self.trend_price = None
         self.trend_bullish = False
         self._prev_trend_bullish = False
+        self.trend_bearish = False
+        self._prev_trend_bearish = False
 
         # Trailing
         self.trailBuy = False
@@ -253,11 +257,11 @@ class CryptoBot:
             )
         )
 
-        print("Filtro RSI:        buy < 60 | sell > 40")
+        print("Filtro RSI:        buy < 55 | sell > 40")
 
         print(
-            "Trend filter:      %s SMA20 > SMA50 + Price > SMA50"
-            % self.trend_timeframe
+            "Trend filter:      %s Price > EMA200 + ADX >= %.1f"
+            % (self.trend_timeframe, self.adx_threshold)
         )
 
         print(
@@ -399,7 +403,10 @@ class CryptoBot:
 
         self.trend_bullish = (
             self.trend_price > self.trend_ema200
-            and self.trend_adx > 25
+            and self.trend_adx >= self.adx_threshold
+        )
+        self.trend_bearish = (
+            self.trend_price < self.trend_ema200
         )
 
         return self.trend_bullish
@@ -979,13 +986,13 @@ class CryptoBot:
                 continue
 
             # --------------------------------------------------
-            # TREND FLIP EXIT: chiudi posizione se trend 15m gira bearish
+            # TREND FLIP EXIT: chiudi posizione se trend 15m gira bearish (Price < EMA200)
             # --------------------------------------------------
             if self.cryptoCoin > 0:
-                if self._prev_trend_bullish and not self.trend_bullish:
+                if self.trend_bearish:
                     print("")
                     print("=" * 60)
-                    print("!!! TREND FLIP BEARISH - CHIUSURA POSIZIONE !!!")
+                    print("!!! TREND FLIP BEARISH (Price < EMA200) - CHIUSURA POSIZIONE !!!")
                     print(
                         "Trend 15m: Price %.4f | SMA20 %.4f | EMA200 %.4f | ADX %.1f"
                         % (
@@ -1080,6 +1087,7 @@ class CryptoBot:
                         )
 
             self._prev_trend_bullish = self.trend_bullish
+            self._prev_trend_bearish = self.trend_bearish
 
             # --------------------------------------------------
             # LOG
@@ -1188,12 +1196,13 @@ class CryptoBot:
 
             print(
                 "  TREND %s: Price %.4f | SMA20 %.4f | "
-                "SMA50 %.4f | BULLISH=%s"
+                "EMA200 %.4f | ADX %.1f | BULLISH=%s"
                 % (
                     self.trend_timeframe,
                     self.trend_price,
                     self.trend_sma1,
-                    self.trend_sma2,
+                    self.trend_ema200,
+                    self.trend_adx,
                     self.trend_bullish,
                 )
             )

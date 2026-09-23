@@ -36,9 +36,12 @@ def main(options):
     # diretto - stessa logica già usata per STOPSIZE/atr_mult sul trailing.
     hard_stop_atr_mult = float(myObject.get('HARD_STOP_ATR_MULT', 4.0))
 
+    # Soglia minima ADX per il trend bullish su timeframe superiore (default: 20.0)
+    adx_threshold = float(myObject.get('ADX_THRESHOLD', 20.0))
+
     bot = CryptoBot(symbol, stopSize, interval, timeframe, multiSize, percStable, percCoin, real, stoplossorder,
                      atr_period=atr_period, atr_mult=atr_mult, max_loss_pct=max_loss_pct,
-                     hard_stop_atr_mult=hard_stop_atr_mult)
+                     hard_stop_atr_mult=hard_stop_atr_mult, adx_threshold=adx_threshold)
     bot.run()
 
 if __name__ == "__main__":
