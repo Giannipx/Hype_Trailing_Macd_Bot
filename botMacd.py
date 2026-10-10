@@ -51,6 +51,8 @@ class CryptoBot:
         max_loss_pct=None,
         hard_stop_atr_mult=None,
         adx_threshold=20.0,
+        trail_buy_timeout=900,
+        trend_flip_exit="n",
     ):
         # Wallet / ordini
         self.wallet_binance = Hyperliquid(
@@ -128,6 +130,12 @@ class CryptoBot:
         self._prev_trend_bearish = False
 
         # Trailing
+        self.trail_buy_timeout = (
+            float(trail_buy_timeout)
+            if trail_buy_timeout is not None
+            else 900.0
+        )
+        self.trend_flip_exit = str(trend_flip_exit).strip().lower()
         self.trailBuy = False
         self.trailSell = False
         self.take_profit_hit = False
@@ -448,12 +456,17 @@ class CryptoBot:
         if self.priceMin <= 0:
             return False
 
-        if self.take_profit_hit:
+        coin_symbol = self.market.split("/")[0]
+        max_loss_pct = getattr(self, 'max_loss_pct', 0.01)
+        hard_stop_atr_mult = getattr(self, 'hard_stop_atr_mult', 4.0)
+        floor_distance = self.priceMin * max_loss_pct
+        atr_distance = (self.atr or 0) * hard_stop_atr_mult
+
+        is_break_even = self.take_profit_hit
+        if is_break_even:
             # Sposta l'hard stop a break-even (prezzo di ingresso + piccolo margine)
             stop_distance = - (self.priceMin * 0.002) 
         else:
-            floor_distance = self.priceMin * getattr(self, 'max_loss_pct', 0.01)
-            atr_distance = (self.atr or 0) * getattr(self, 'hard_stop_atr_mult', 4.0)
             stop_distance = max(floor_distance, atr_distance)
             
         stop_price = self.priceMin - stop_distance
@@ -463,30 +476,47 @@ class CryptoBot:
 
         print("")
         print("=" * 60)
-        print("!!! HARD STOP LOSS !!!")
-        print(
-            "Prezzo medio:      %.4f"
-            % self.priceMin
-        )
-        print(
-            "Prezzo corrente:   %.4f"
-            % self.price
-        )
-        print(
-            "Stop:              %.4f (-$%.4f, pavimento %.2f%%, ATR x%.1f: $%.4f)"
-            % (
-                stop_price,
-                stop_distance,
-                self.max_loss_pct * 100,
-                self.hard_stop_atr_mult,
-                atr_distance,
+        if is_break_even:
+            print("!!! BREAK-EVEN STOP (DOPO TAKE PROFIT) !!!")
+            print(
+                "Prezzo medio:      %.4f"
+                % self.priceMin
             )
-        )
+            print(
+                "Prezzo corrente:   %.4f"
+                % self.price
+            )
+            print(
+                "Stop Break-even:   %.4f (+0.20%%)"
+                % stop_price
+            )
+        else:
+            print("!!! HARD STOP LOSS !!!")
+            print(
+                "Prezzo medio:      %.4f"
+                % self.priceMin
+            )
+            print(
+                "Prezzo corrente:   %.4f"
+                % self.price
+            )
+            print(
+                "Stop:              %.4f (-$%.4f, pavimento %.2f%%, ATR x%.1f: $%.4f)"
+                % (
+                    stop_price,
+                    stop_distance,
+                    max_loss_pct * 100,
+                    hard_stop_atr_mult,
+                    atr_distance,
+                )
+            )
         print(
-            "Posizione:         %.4f HYPE"
-            % self.cryptoCoin
+            "Posizione:         %.4f %s"
+            % (self.cryptoCoin, coin_symbol)
         )
         print("=" * 60)
+
+        stop_name = "BREAK-EVEN STOP" if is_break_even else "HARD STOP"
 
         try:
             # Se esiste uno stop reale già aperto, cancellalo
@@ -506,7 +536,7 @@ class CryptoBot:
                     )
 
             amount = self.wallet_binance.round_size(
-                self.market.split("/")[0],
+                coin_symbol,
                 self.cryptoCoin,
             )
 
@@ -521,12 +551,12 @@ class CryptoBot:
 
             if not result.get("filled", False):
                 print(
-                    "HARD STOP NON ESEGUITO: %s"
-                    % result.get("error")
+                    "%s NON ESEGUITO: %s"
+                    % (stop_name, result.get("error"))
                 )
 
                 self.data_binance.cronoMacdString(
-                    "HARD STOP NON ESEGUITO",
+                    "%s NON ESEGUITO" % stop_name,
                     result.get("error"),
                 )
 
@@ -548,10 +578,11 @@ class CryptoBot:
             )
 
             self.data_binance.cronoMacdString(
-                "HARD STOP | Entry %.4f | "
+                "%s | Entry %.4f | "
                 "Trigger %.4f | Fill %.4f | "
                 "PnL %.4f | Fee %.4f"
                 % (
+                    stop_name,
                     self.priceMin,
                     stop_price,
                     fill_price,
@@ -561,9 +592,10 @@ class CryptoBot:
             )
 
             print(
-                "HARD STOP ESEGUITO | Fill %.4f | "
+                "%s ESEGUITO | Fill %.4f | "
                 "PnL %.4f | Fee %.4f"
                 % (
+                    stop_name,
                     fill_price,
                     pnl,
                     fee,
@@ -573,6 +605,7 @@ class CryptoBot:
             self.buy_entries = 0
             self.buy_armed = True
             self.previous_histogram = None
+            self.take_profit_hit = False
 
             self.wallet()
 
@@ -580,12 +613,12 @@ class CryptoBot:
 
         except Exception as e:
             print(
-                "Errore HARD STOP: %s"
-                % e
+                "Errore %s: %s"
+                % (stop_name, e)
             )
 
             self.data_binance.cronoMacdString(
-                "ERRORE HARD STOP",
+                "ERRORE %s" % stop_name,
                 str(e),
             )
 
@@ -616,7 +649,10 @@ class CryptoBot:
             print("Target:            %.4f (+%.4f)" % (tp_price, tp_distance))
             print("=" * 60)
             
-            sell_amount = round(self.cryptoCoin * 0.5, 4) # Vende il 50%
+            sell_amount = self.wallet_binance.round_size(
+                self.market.split("/")[0],
+                self.cryptoCoin * 0.5,
+            )
             if sell_amount <= 0:
                 return False
                 
@@ -986,9 +1022,12 @@ class CryptoBot:
                 continue
 
             # --------------------------------------------------
-            # TREND FLIP EXIT: chiudi posizione se trend 15m gira bearish (Price < EMA200)
+            # TREND FLIP EXIT (opzionale, default "n"):
+            # chiudi posizione se trend 15m gira bearish (Price < EMA200).
+            # Disattivato di default per evitare chiusure immediate in perdita
+            # su normali oscillazioni del prezzo, lasciando lavorare Take Profit e Hard Stop.
             # --------------------------------------------------
-            if self.cryptoCoin > 0:
+            if self.cryptoCoin > 0 and self.trend_flip_exit == "y":
                 if self.trend_bearish:
                     print("")
                     print("=" * 60)
@@ -1522,6 +1561,7 @@ class CryptoBot:
                                     self.stoplossorder,
                                     self.wallet_binance,
                                     self.data_binance,
+                                    max_duration=self.trail_buy_timeout,
                                 )
 
                                 task.run()

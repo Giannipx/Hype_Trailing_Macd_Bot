@@ -39,9 +39,16 @@ def main(options):
     # Soglia minima ADX per il trend bullish su timeframe superiore (default: 20.0)
     adx_threshold = float(myObject.get('ADX_THRESHOLD', 20.0))
 
+    # Timeout di invalidazione del trailing BUY in secondi (default: 900s = 15m)
+    trail_buy_timeout = float(myObject.get('TRAIL_BUY_TIMEOUT', 900.0))
+
+    # Chiusura forzata se trend 15m gira bearish (default: n)
+    trend_flip_exit = str(myObject.get('TREND_FLIP_EXIT', 'n')).strip().lower()
+
     bot = CryptoBot(symbol, stopSize, interval, timeframe, multiSize, percStable, percCoin, real, stoplossorder,
                      atr_period=atr_period, atr_mult=atr_mult, max_loss_pct=max_loss_pct,
-                     hard_stop_atr_mult=hard_stop_atr_mult, adx_threshold=adx_threshold)
+                     hard_stop_atr_mult=hard_stop_atr_mult, adx_threshold=adx_threshold,
+                     trail_buy_timeout=trail_buy_timeout, trend_flip_exit=trend_flip_exit)
     bot.run()
 
 if __name__ == "__main__":

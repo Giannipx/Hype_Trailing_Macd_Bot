@@ -8,8 +8,8 @@ Python 3.9 trading bot for **Hyperliquid perpetuals** (adapted from a Binance sp
 python jbmainMacd.py --file hype.txt
 ```
 
-- Entry point `jbmainMacd.py` parses a `KEY=VALUE` params file (e.g. `hype.txt`). Values must not contain spaces (`REAL=n`, not `REAL = n`).
-- The bot loops forever on MACD/RSI signals; `StopTrail` (trailMacd.py) follows price every `INTERVAL` seconds until its stop is touched.
+- The bot loops forever on MACD/RSI signals; `StopTrail` (trailMacd.py) follows price every `INTERVAL` seconds until its stop is touched, protected by timeout (`TRAIL_BUY_TIMEOUT`) and breakdown invalidation.
+- Risk management in `botMacd.py`: partial take profit (50% at 1.5x ATR, trailing stop shifted to break-even +0.20%) and dynamic ATR hard stop (`HARD_STOP_ATR_MULT`). `TREND_FLIP_EXIT` is optional and disabled by default (`n`).
 
 ## Live vs paper trading (`config.py`)
 

@@ -380,3 +380,24 @@ posizione dopo ordine reale, naming `get_balance`, `bot_state.json` per la
 dashboard, arricchimento wallet paper (equity/drawdown), modello
 spread/slippage nel paper, verifica MACD contro libreria standard prima del
 backtest — vedi §5.3 per il dettaglio.
+
+---
+
+## 7. Terzo giro: Fix Crash Break-Even e Protezione Esecuzione StopTrail
+
+### 7.1 — Crash UnboundLocalError su `atr_distance`
+- **File:** `botMacd.py` (`check_hard_stop`)
+- **Problema:** Quando scattava lo stop a Break-Even (+0.20% dopo Take Profit Parziale al 50%), il codice entrava nel ramo `if self.take_profit_hit`, dove `atr_distance` non era valorizzata. Il blocco di log/stampa cercava di stamparla, sollevando `UnboundLocalError: local variable 'atr_distance' referenced before assignment`. Questo errore ha ucciso il bot il 27/09/2026 alle 04:25 UTC.
+- **Fix:** `floor_distance`, `atr_distance`, `max_loss_pct` e `hard_stop_atr_mult` ora vengono calcolati preventivamente prima del controllo condizionale. È stato aggiunto un blocco di stampa e log dedicato al Break-Even Stop, e `self.take_profit_hit` viene resettato a `False` al completamento dell'uscita.
+
+### 7.2 — Timeout e Invalidazione Breakdown in `StopTrail`
+- **File:** `trailMacd.py`, `botMacd.py`, `jbmainMacd.py`, `hype.txt`
+- **Problema:** `StopTrail.run()` era un loop bloccante infinito privo di timeout. Nei log di `cronoMacd.txt` è rimasto attivo per ore (fino a 4.5 ore nel Trade 1 e oltre 1 ora nel Trade 4) mentre il prezzo crollava. Al primo micro-rimbalzo comprava a prezzi bassissimi in pieno downtrend.
+- **Fix:** 
+  1. Aggiunto `TRAIL_BUY_TIMEOUT` (default: 900s = 15m). Se il buy non chiude entro 15 minuti, il trail viene annullato (`self.running = False`), evitando ingressi su segnali obsoleti.
+  2. Aggiunta invalidazione per crollo del prezzo (`max_drop_mult = 3.0` x `stopsize` rispetto al prezzo di partenza). Se il mercato collassa mentre il trail segue, il trail abortisce subito per breakdown.
+
+### 7.3 — Disattivazione di default di `TREND_FLIP_EXIT`
+- **File:** `botMacd.py`, `jbmainMacd.py`, `hype.txt`
+- **Problema:** Se `Price < EMA200` a 15m, il bot chiudeva forzatamente e all'istante l'intera posizione a mercato. Questo causava uscite dopo 17 secondi o 2-3 minuti su normale rumore di prezzo, accumulando perdite secche e doppie fee taker (responsabile di 3 trade in perdita su 5). Questa regola non era presente neanche nel backtest.
+- **Fix:** Reso opzionale e disabilitato di default (`TREND_FLIP_EXIT=n`). La gestione del rischio è ora affidata a: Take Profit parziale 50% (+1.5x ATR con stop a break-even), Hard Stop dinamico (4x ATR con floor `max_loss_pct`), e Sell Trailing stop basato su MACD.

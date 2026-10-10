@@ -10,7 +10,7 @@ from hl import Hyperliquid
 
 class StopTrail:
     def __init__(self, market, type, stopsize, interval, multiSize, stableBuyUsd, percCoin, real, stoplossorder,
-                 wallet_instance=None, data_instance=None):
+                 wallet_instance=None, data_instance=None, max_duration=900, max_drop_mult=3.0):
         # FIX: le istanze Hyperliquid vengono condivise con quelle di CryptoBot
         # invece di crearne di nuove ad ogni trade. Prima se ne aprivano 2 qui +
         # 2 in CryptoBot (overhead REST inutile) e _leverage_set era per-istanza,
@@ -32,15 +32,19 @@ class StopTrail:
         self.stoplossorder = stoplossorder
         self.sellOrderStopLoss = False  # order stop loss after buy
         self.running = False
+        self.max_duration = float(max_duration) if max_duration is not None else 900.0
+        self.max_drop_mult = float(max_drop_mult) if max_drop_mult is not None else 3.0
+        self.initial_price = self.data_binance.get_price(self.market)
         self.stoploss = self.initialize_stop()
         self.wallet()
 
     def initialize_stop(self):
         print("inizialize stop")
+        px = getattr(self, "initial_price", None) or self.data_binance.get_price(self.market)
         if self.type == "buy":
-            return (self.data_binance.get_price(self.market) + self.stopsize)
+            return px + self.stopsize
         else:
-            return (self.data_binance.get_price(self.market) - self.stopsize)
+            return px - self.stopsize
 
     # UPDATE STOP******************************************************
     def update_stop(self):
@@ -203,8 +207,39 @@ class StopTrail:
     # RUN*******************************************
     def run(self):
         self.running = True
+        self.start_time = time.time()
         while self.running:
             try:
+                # Controlli di invalidazione / timeout per il trailing BUY
+                if self.type == "buy":
+                    elapsed = time.time() - self.start_time
+                    if self.max_duration > 0 and elapsed > self.max_duration:
+                        print("++++++++++++++++++++++++++++++++++++++++++")
+                        print(
+                            "TRAIL BUY ANNULLATO: timeout %.0fs superato. Segnale MACD scaduto."
+                            % self.max_duration
+                        )
+                        self.wallet_binance.cronoMacdString(
+                            "TRAIL BUY ANNULLATO per timeout (%.0fs) | Prezzo: %.4f"
+                            % (self.max_duration, self.price)
+                        )
+                        self.running = False
+                        break
+
+                    max_drop = self.stopsize * self.max_drop_mult
+                    if self.initial_price > 0 and (self.initial_price - self.price) > max_drop:
+                        print("++++++++++++++++++++++++++++++++++++++++++")
+                        print(
+                            "TRAIL BUY ANNULLATO: prezzo sceso oltre soglia (%.4f -> %.4f, drop -$%.4f > soglia $%.4f). Breakdown in corso."
+                            % (self.initial_price, self.price, self.initial_price - self.price, max_drop)
+                        )
+                        self.wallet_binance.cronoMacdString(
+                            "TRAIL BUY ANNULLATO per drop eccessivo | Inizio: %.4f | Attuale: %.4f | Drop: -$%.4f"
+                            % (self.initial_price, self.price, self.initial_price - self.price)
+                        )
+                        self.running = False
+                        break
+
                 self.print_status()
                 self.update_stop()
             except Exception as e:
