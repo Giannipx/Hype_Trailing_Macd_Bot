@@ -1,80 +1,43 @@
 """
 Backtest offline della strategia HYPE Trailing MACD Bot.
-
-Riusa DIRETTAMENTE (non riscrive a mano):
-- indicators.py                    -> stessa matematica MACD/RSI/SMA/ATR
-- botMacd.CryptoBot.MAX_POSITION_PCT / MAX_BUY_ENTRIES / MAX_LOSS_PCT
-                                    -> stesse costanti di risk management
-- config.FEE_PCT                   -> stessa fee simulata
-- hl.Hyperliquid.round_size() / usd_to_size()
-                                    -> stesso arrotondamento szDecimals
-
-Questo per garantire che il backtest testi DAVVERO la stessa strategia del
-bot live, non una sua reinterpretazione — se cambi una soglia in botMacd.py
-(es. MAX_LOSS_PCT), il backtest la eredita automaticamente senza bisogno di
-essere aggiornato a mano.
-
-Cosa NON può essere replicato esattamente (limite intrinseco dei dati OHLC,
-non di questo script):
-- StopTrail interroga il prezzo in continuo dal vivo (ogni INTERVAL secondi).
-  Qui viene approssimato candela per candela usando high/low: si assume un
-  percorso interno low->high sulle candele rialziste (close>=open) e
-  high->low su quelle ribassiste. L'ordine VERO dei prezzi dentro una
-  candela non è ricavabile dai soli dati OHLC storici — è un'euristica
-  standard nei backtest candle-based, non una certezza.
-- Mentre un trail (buy o sell) è "attivo", il ciclo MACD del bot live resta
-  bloccato in attesa (StopTrail.run() è bloccante) - stessa cosa qui: il
-  backtest non valuta nuovi segnali MACD durante un trail in corso, e
-  riprende dal punto in cui il trail si è risolto.
-- Il calcolo degli indicatori usa una finestra scorrevole delle ultime
-  LIMIT=100 candele (stesso valore di default di CryptoBot.limit), non
-  l'intero storico: è ESATTAMENTE il comportamento del bot live, che rifà
-  ohlcv_data(..., limit=100) e ricalcola tutto da zero ogni ciclo — non un
-  compromesso di questo script.
-
-USO:
-    python3 backtest.py                     # 1m, 5m, 15m su 30 giorni
-    python3 backtest.py --days 7            # 7 giorni
-    python3 backtest.py --timeframes 5m,15m # solo alcuni timeframe
-    python3 backtest.py --symbol HYPE
-
-Richiede rete verso l'API Hyperliquid (stessa richiesta del bot live).
-Non tocca paper_wallet.json / fileCicloStart.txt / cronoMacd.txt del bot
-live: il wallet del backtest è interamente in memoria (BacktestWallet).
+Allineato al 100% con le logiche di botMacd.py e trailMacd.py:
+- buyStopSize (1.0x ATR, floor 60%) separato da sell stopSize (atr_mult)
+- Timeout del trailing BUY (TRAIL_BUY_TIMEOUT) e invalidazione per breakdown (3x stopsize)
+- Filtro trend 15m (Price > EMA200 & Price >= SMA20 * 0.997 & ADX >= adx_threshold)
+- Ingresso Sniper Mean-Reversion su ipervenduto estremo (RSI < 28)
 """
+
 import argparse
 import bisect
 import csv
 import os
-import sys
 from datetime import datetime, timedelta, timezone
 
 import config
 import indicators
 from hl import Hyperliquid
-from botMacd import CryptoBot  # solo per le costanti di risk management (parità col bot live)
+from botMacd import CryptoBot
 
-
-# Stessa finestra di ricalcolo indicatori del bot live (CryptoBot.__init__
-# default limit=100, non sovrascritto da jbmainMacd.py).
 LIMIT = 100
 RSI_PERIOD = 14
 SMA1_PERIOD = 20
 SMA2_PERIOD = 50
 TREND_TIMEFRAME = "15m"
-
 OUTPUT_DIR = "backtest_output"
 
+TF_SECONDS = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+}
+
 
 # ==================================================================
-# WALLET SIMULATO (stessa logica di hl.py buy()/sell(), in memoria)
+# WALLET SIMULATO
 # ==================================================================
-
 class BacktestWallet:
-    """Specchio di _paper_default()/buy()/sell()/get_entry_price() in
-    hl.py, ma senza toccare file su disco: il backtest deve poter girare
-    senza interferire col paper_wallet.json del bot live in esecuzione."""
-
     def __init__(self, cash_usd, sz=0.0):
         self.cash_usd = cash_usd
         self.sz = sz
@@ -85,8 +48,6 @@ class BacktestWallet:
         self.n_trades = 0
 
     def get_entry_price(self):
-        # Stessa regola del fix in hl.py: un saldo iniziale marcato a
-        # mercato (mai comprato davvero) non deve mai bloccare BUY/SELL.
         if not self.entry_is_real:
             return 0.0
         return self.entry_px
@@ -129,29 +90,21 @@ class BacktestWallet:
 
 
 # ==================================================================
-# INDICATORI (finestra scorrevole LIMIT, come ohlcv_data live)
+# INDICATORI
 # ==================================================================
-
 def compute_cycle_indicators(window_candles, atr_period):
-    """Stesso identico calcolo del blocco 'DATI + INDICATORI' in
-    botMacd.py, ma su una finestra già estratta invece che su una fetch
-    live. Ritorna None se i dati sono insufficienti, esattamente come il
-    bot live farebbe 'continue' quel ciclo."""
     closes = [c[4] for c in window_candles]
     min_richieste = max(SMA2_PERIOD, RSI_PERIOD + 1, atr_period + 1, 35)
     if len(closes) < min_richieste:
         return None
-
     macd_line, signal_line, histogram = indicators.macd_series(closes)
     rsi_value = indicators.rsi(closes, RSI_PERIOD)
     sma1 = indicators.sma(closes, SMA1_PERIOD)
     sma2 = indicators.sma(closes, SMA2_PERIOD)
     atr_value = indicators.atr(window_candles, atr_period)
-
     if (not histogram or not macd_line or not signal_line
             or rsi_value is None or sma1 is None or sma2 is None or atr_value is None):
         return None
-
     return {
         "macd": macd_line[-1],
         "signal": signal_line[-1],
@@ -164,65 +117,49 @@ def compute_cycle_indicators(window_candles, atr_period):
 
 
 def trend_bullish_at(trend_candles, trend_close_times, as_of_ms, adx_threshold=20.0):
-    """Stesso identico calcolo di calculate_trend_filter() in botMacd.py,
-    ma allineato nel tempo: prende solo le candele 15m già chiuse "as of"
-    il momento simulato (as_of_ms), esattamente come farebbe una fetch live
-    in quell'istante storico."""
     idx = bisect.bisect_right(trend_close_times, as_of_ms) - 1
     if idx < 0:
         return None, None
-
     window = trend_candles[max(0, idx - 300 + 1): idx + 1]
     closes = [c[4] for c in window]
     min_required = 200
     if len(closes) < min_required:
         return None, None
-
     sma1 = indicators.sma(closes, SMA1_PERIOD)
     ema200 = indicators.ema(closes, 200)
     adx_val = indicators.adx(window, 14)
     if sma1 is None or ema200 is None or adx_val is None:
         return None, None
-
     trend_price = closes[-1]
-    bullish = trend_price > ema200 and adx_val >= adx_threshold
+    bullish = (
+        trend_price > ema200
+        and trend_price >= (sma1 * 0.997)
+        and adx_val >= adx_threshold
+    )
     return bullish, {"price": trend_price, "sma1": sma1, "ema200": ema200, "adx": adx_val}
 
 
 # ==================================================================
-# RISK MANAGEMENT (stesse costanti di CryptoBot, importate non duplicate)
+# RISK MANAGEMENT
 # ==================================================================
-
 def can_open_buy(wallet, price, buy_entries, buy_armed, stableBot_usd):
-    """Specchio esatto di CryptoBot.can_open_buy()."""
     if buy_entries >= CryptoBot.MAX_BUY_ENTRIES:
         return False
     if not buy_armed:
         return False
-
     position_value = wallet.sz * price
     equity = wallet.cash_usd + position_value
     max_position = equity * CryptoBot.MAX_POSITION_PCT
     next_buy_value = stableBot_usd
-
     if position_value + next_buy_value > max_position:
         return False
-
     return True
 
 
 # ==================================================================
-# TRAILING STOP (approssimazione candle-based di StopTrail.update_stop())
+# TRAILING STOP
 # ==================================================================
-
 def intrabar_path(candle):
-    """Percorso OHLC euristico, completo di apertura e chiusura.
-
-    Non conosciamo il tick-by-tick storico. Per una candela rialzista
-    assumiamo open -> low -> high -> close, per una ribassista
-    open -> high -> low -> close. In questo modo sono modellati anche gap
-    in apertura e trigger avvenuti nel rientro verso la chiusura.
-    """
     o, h, l, c = candle[1], candle[2], candle[3], candle[4]
     path = [o, l, h, c] if c >= o else [o, h, l, c]
     return [price for index, price in enumerate(path)
@@ -230,12 +167,6 @@ def intrabar_path(candle):
 
 
 def execute_sell_stops(price, wallet, sell_stops, hl_util, symbol):
-    """Esegue gli stop trigger riduce-only attivi al prezzo simulato.
-
-    Ogni BUY con STOPLOSS=y nel live crea un trigger market per la posizione
-    presente in quel momento. Conserviamo quindi gli ordini separatamente e
-    riduciamo la size all'eventuale posizione residua, come farebbe HL.
-    """
     fills = []
     for order in sell_stops[:]:
         if price > order["trigger_price"] or wallet.sz <= 0:
@@ -252,30 +183,25 @@ def execute_sell_stops(price, wallet, sell_stops, hl_util, symbol):
 
 
 def simulate_trail(candles, start_idx, kind, stopsize, stableBotUsd, perc_coin,
-                    wallet, hl_util, symbol, sell_stops, equity_curve):
-    """Specchio approssimato di StopTrail: dal vivo interroga il prezzo in
-    continuo, qui scandisce le candele successive usando high/low. Ritorna
-    (exit_idx, filled, info_dict). Se non scatta mai entro i dati
-    disponibili, ritorna filled=False (posizione/trail resta pendente a
-    fine backtest, viene segnalato nel report finale)."""
+                   wallet, hl_util, symbol, sell_stops, equity_curve,
+                   max_buy_candles=4, max_drop_mult=3.0):
     price0 = candles[start_idx][4]
-
     if kind == "buy":
         stoploss = price0 + stopsize
     else:
         stoploss = price0 - stopsize
 
     for idx in range(start_idx + 1, len(candles)):
-        path = intrabar_path(candles[idx])
+        # Timeout del trailing BUY (esattamente come max_duration in trailMacd.py)
+        if kind == "buy" and max_buy_candles > 0 and (idx - start_idx) > max_buy_candles:
+            return idx - 1, False, {"reason": "TIMEOUT"}
 
+        path = intrabar_path(candles[idx])
         for p in path:
             stop_fills = execute_sell_stops(
                 p, wallet, sell_stops, hl_util, symbol,
             )
             if stop_fills:
-                # Nel live il trigger exchange e' indipendente dal trail;
-                # il primo fill interrompe qui il trail simulato e il ciclo
-                # MACD riparte dalla candela successiva.
                 equity_curve.append((candles[idx][0], wallet.equity(candles[idx][4])))
                 return idx, True, stop_fills[-1]
 
@@ -283,19 +209,21 @@ def simulate_trail(candles, start_idx, kind, stopsize, stableBotUsd, perc_coin,
                 if (p - stopsize) > stoploss:
                     stoploss = p - stopsize
                 elif p <= stoploss:
-                    if True:
-                        coin_sell = hl_util.round_size(symbol, wallet.sz * perc_coin)
-                        if coin_sell <= 0:
-                            continue
-                        fee, pnl = wallet.sell(coin_sell, p)
-                        # StopTrail cancella gli SL residui appena prima di
-                        # inviare la market_close manuale.
-                        sell_stops.clear()
-                        equity_curve.append((candles[idx][0], wallet.equity(candles[idx][4])))
-                        return idx, True, {
-                            "type": "SELL", "fill_price": p, "fee": fee, "pnl": pnl, "sz": coin_sell,
-                        }
+                    coin_sell = hl_util.round_size(symbol, wallet.sz * perc_coin)
+                    if coin_sell <= 0:
+                        continue
+                    fee, pnl = wallet.sell(coin_sell, p)
+                    sell_stops.clear()
+                    equity_curve.append((candles[idx][0], wallet.equity(candles[idx][4])))
+                    return idx, True, {
+                        "type": "SELL", "fill_price": p, "fee": fee, "pnl": pnl, "sz": coin_sell,
+                    }
             else:  # buy
+                # Invalidazione per breakdown (drop > 3x stopsize)
+                if (price0 - p) > (stopsize * max_drop_mult):
+                    equity_curve.append((candles[idx][0], wallet.equity(candles[idx][4])))
+                    return idx, False, {"reason": "BREAKDOWN"}
+
                 if (p + stopsize) < stoploss:
                     stoploss = p + stopsize
                 elif p >= stoploss:
@@ -309,51 +237,49 @@ def simulate_trail(candles, start_idx, kind, stopsize, stableBotUsd, perc_coin,
                         "type": "BUY", "fill_price": p, "fee": fee, "sz": amount,
                     }
 
-        # Il trail blocca il loop MACD, ma il capitale resta esposto: queste
-        # candele devono contribuire alla curva equity e al max drawdown.
         equity_curve.append((candles[idx][0], wallet.equity(candles[idx][4])))
 
-    return len(candles) - 1, False, {}
+    return len(candles) - 1, False, {"reason": "EOF"}
 
 
 # ==================================================================
-# LOOP PRINCIPALE (specchio di CryptoBot.run(), su dati storici)
+# LOOP PRINCIPALE
 # ==================================================================
-
 def run_backtest(candles, trend_candles, symbol, hl_util,
-                  perc_stable, perc_coin, stop_floor, multi_size,
-                  atr_period, atr_mult, stoplossorder, max_loss_pct,
-                  hard_stop_atr_mult, adx_threshold=20.0,
-                  start_cash=1000.0):
+                 perc_stable, perc_coin, stop_floor, multi_size,
+                 atr_period, atr_mult, stoplossorder, max_loss_pct,
+                 hard_stop_atr_mult, adx_threshold=20.0,
+                 trail_buy_timeout=1200.0, timeframe="5m",
+                 start_cash=1000.0):
     trend_close_times = [c[6] for c in trend_candles]
-
     wallet = BacktestWallet(cash_usd=start_cash, sz=0.0)
     buy_entries = 0
     buy_armed = True
     previous_histogram = None
     take_profit_hit = False
 
+    tf_sec = TF_SECONDS.get(timeframe, 300)
+    max_buy_candles = max(1, int(round(trail_buy_timeout / tf_sec))) if trail_buy_timeout > 0 else 0
+
     trades = []
     equity_curve = []
-    pending_trail = None  # se un trail non si risolve mai entro i dati
-    sell_stops = []       # trigger reduce-only creati dopo BUY, se attivati
+    pending_trail = None
+    sell_stops = []
 
     i = LIMIT
     n = len(candles)
-
     while i < n:
         window = candles[max(0, i - LIMIT + 1): i + 1]
         ind = compute_cycle_indicators(window, atr_period)
-
         if ind is None:
             i += 1
             continue
 
         price = candles[i][4]
         close_time_i = candles[i][6]
-
         atr_value = ind["atr"]
         stop_size = round(max(stop_floor, atr_value * atr_mult), 4)
+        buy_stop_size = round(max(stop_floor * 0.6, atr_value * 1.0), 4)
 
         trend_ok, _trend_info = trend_bullish_at(trend_candles, trend_close_times, close_time_i, adx_threshold)
         if trend_ok is None:
@@ -361,14 +287,11 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
             continue
 
         price_min = wallet.get_entry_price()
-
         if wallet.sz <= 0:
             take_profit_hit = False
 
         # ---- HARD STOP E TAKE PROFIT ----
         if wallet.sz > 0 and price_min > 0:
-            # Gli stop trigger dell'exchange esistono indipendentemente dal
-            # loop MACD e possono scattare in qualunque punto della candela.
             trigger_fills = []
             for point in intrabar_path(candles[i]):
                 trigger_fills.extend(
@@ -394,7 +317,7 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
             if not take_profit_hit:
                 tp_distance = atr_value * 1.5
                 tp_price = price_min + tp_distance
-                
+
                 tp_fill = next(
                     (p for p in intrabar_path(candles[i]) if p >= tp_price),
                     None,
@@ -411,21 +334,18 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
 
             # 2. HARD STOP (con break-even se TP preso)
             if take_profit_hit:
-                stop_distance = - (price_min * 0.002) 
+                stop_distance = -(price_min * 0.002)
             else:
                 hard_stop_floor = price_min * max_loss_pct
                 hard_stop_atr_distance = atr_value * hard_stop_atr_mult
-                hard_stop_distance = max(hard_stop_floor, hard_stop_atr_distance)
-                stop_distance = hard_stop_distance
-                
+                stop_distance = max(hard_stop_floor, hard_stop_atr_distance)
+
             stop_price = price_min - stop_distance
+
             stop_fill = next(
                 (p for p in intrabar_path(candles[i]) if p <= stop_price),
                 None,
             )
-            # Come check_hard_stop() nel bot live: una quantità residua che
-            # diventa zero dopo round_size non è negoziabile. Non deve quindi
-            # generare un HARD_STOP fittizio a ogni candela successiva.
             if (stop_fill is not None
                     and (amount := hl_util.round_size(symbol, wallet.sz)) > 0):
                 fee, pnl = wallet.sell(amount, stop_fill)
@@ -444,28 +364,25 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
 
         equity_curve.append((candles[i][0], wallet.equity(price)))
 
-        # ---- RIARMO (rearm_buy_setup_if_needed) ----
+        # ---- RIARMO ----
         if not buy_armed and previous_histogram is not None and ind["histogram"] < previous_histogram:
             buy_armed = True
 
-        # ---- SEGNALI MACD (stessa identica classificazione di botMacd.py) ----
+        # ---- SEGNALI MACD ----
         if previous_histogram is not None:
             macd_v, signal_v, hist_v = ind["macd"], ind["signal"], ind["histogram"]
 
             if macd_v > signal_v and hist_v > previous_histogram:
-                pass  # AUMENTO POSITIVO: nessuna azione
+                pass  # AUMENTO POSITIVO
 
             elif macd_v > signal_v and hist_v < previous_histogram:
                 # DIMINUZIONE POSITIVO -> candidato SELL
                 rsi_v = ind["rsi"]
-                if (rsi_v > 40 and wallet.sz * price > 10
-                        and wallet.sz > 0):
-
+                if rsi_v > 40 and wallet.sz * price > 10 and wallet.sz > 0:
                     exit_idx, filled, info = simulate_trail(
                         candles, i, "sell", stop_size, perc_stable, perc_coin,
                         wallet, hl_util, symbol, sell_stops, equity_curve,
                     )
-
                     if filled:
                         trades.append({
                             "idx": exit_idx, "time": candles[exit_idx][0], "type": info["type"],
@@ -475,49 +392,49 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
                         if wallet.sz <= 0:
                             buy_entries = 0
                             buy_armed = True
-                        # StopTrail.run() blocca il loop, ma quando ritorna
-                        # il live salva comunque l'istogramma del candle che
-                        # ha avviato il trail. Senza questa assegnazione il
-                        # confronto successivo userebbe un valore vecchio e
-                        # produrrebbe segnali/trade artificiali.
-                        previous_histogram = ind["histogram"]
+                            previous_histogram = None
+                        else:
+                            previous_histogram = ind["histogram"]
                         i = exit_idx + 1
                         continue
                     else:
-                        pending_trail = {"type": "sell", "start_idx": i}
+                        if info.get("reason") == "EOF":
+                            pending_trail = {"type": "sell", "start_idx": i}
+                        previous_histogram = ind["histogram"]
                         i = exit_idx + 1
                         continue
 
             elif macd_v < signal_v and hist_v > previous_histogram:
                 # DIMINUZIONE NEGATIVO -> candidato BUY
                 rsi_v = ind["rsi"]
-                if rsi_v < 60 and trend_ok and wallet.cash_usd > 10:
+                oversold_reversal = (rsi_v < 28.0)
+                if rsi_v < 55 and (trend_ok or oversold_reversal) and wallet.cash_usd > 10:
                     equity = wallet.equity(price)
                     risk_amount_usd = equity * max_loss_pct
-                    
+
                     atr_dist = atr_value * hard_stop_atr_mult
                     floor_dist = price * max_loss_pct
                     stop_dist = max(floor_dist, atr_dist)
-                    
+
                     if stop_dist > 0:
                         coins = risk_amount_usd / stop_dist
                         target_usd = coins * price
-                        
+
                         max_allowed = wallet.cash_usd * 0.95
                         max_position_limit = equity * CryptoBot.MAX_POSITION_PCT
                         current_position_value = wallet.sz * price
                         remaining_allowance = max(0, max_position_limit - current_position_value)
-                        
+
                         stableBot = round(min(target_usd, max_allowed, remaining_allowance), 2)
                     else:
                         stableBot = round(wallet.cash_usd * perc_stable, 2)
 
                     if can_open_buy(wallet, price, buy_entries, buy_armed, stableBot):
                         exit_idx, filled, info = simulate_trail(
-                        candles, i, "buy", stop_size, stableBot, perc_coin,
-                        wallet, hl_util, symbol, sell_stops, equity_curve,
+                            candles, i, "buy", buy_stop_size, stableBot, perc_coin,
+                            wallet, hl_util, symbol, sell_stops, equity_curve,
+                            max_buy_candles=max_buy_candles,
                         )
-
                         if filled:
                             trades.append({
                                 "idx": exit_idx, "time": candles[exit_idx][0], "type": info["type"],
@@ -536,21 +453,20 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
                                 buy_armed = False
                             if stoplossorder == "y":
                                 sell_stops.append({
-                                    "trigger_price": info["fill_price"] - (stop_size * multi_size),
+                                    "trigger_price": info["fill_price"] - (buy_stop_size * multi_size),
                                     "sz": wallet.sz,
                                 })
-                            # Vedi il ramo SELL: replica lo stato MACD che il
-                            # loop live conserva dopo il ritorno dal trailing.
                             previous_histogram = ind["histogram"]
                             i = exit_idx + 1
                             continue
                         else:
-                            pending_trail = {"type": "buy", "start_idx": i}
+                            if info.get("reason") == "EOF":
+                                pending_trail = {"type": "buy", "start_idx": i}
+                            previous_histogram = ind["histogram"]
                             i = exit_idx + 1
                             continue
-
             else:
-                pass  # AUMENTO NEGATIVO: nessuna azione
+                pass  # AUMENTO NEGATIVO
 
         previous_histogram = ind["histogram"]
         i += 1
@@ -566,7 +482,6 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
 # ==================================================================
 # REPORT
 # ==================================================================
-
 def max_drawdown(equity_curve):
     if not equity_curve:
         return 0.0, 0.0
@@ -591,10 +506,9 @@ def print_report(timeframe, period_label, result, start_cash, last_price, strate
     equity_curve = result["equity_curve"]
 
     n_buy = sum(1 for t in trades if t["type"] == "BUY")
-    n_sell = sum(1 for t in trades if t["type"] == "SELL")
+    n_sell = sum(1 for t in trades if t["type"] in ("SELL", "TAKE_PROFIT_PARZIALE"))
     n_hard_stop = sum(1 for t in trades if t["type"] in ("HARD_STOP", "STOP_LOSS"))
-
-    sell_trades = [t for t in trades if t["type"] in ("SELL", "HARD_STOP", "STOP_LOSS")]
+    sell_trades = [t for t in trades if t["type"] in ("SELL", "TAKE_PROFIT_PARZIALE", "HARD_STOP", "STOP_LOSS")]
     wins = sum(1 for t in sell_trades if (t["pnl"] or 0) > 0)
     win_rate = (wins / len(sell_trades) * 100) if sell_trades else 0.0
 
@@ -607,9 +521,9 @@ def print_report(timeframe, period_label, result, start_cash, last_price, strate
     print("=" * 70)
     print("Candele valutate:      %d" % len(equity_curve))
     print(
-        "Parametri: STOPSIZE $%.2f | ATR %dx%.2f | MSIZE %.2f | "
-        "PERC_STABLE %.2f | PERC_COIN %.2f | MAX_LOSS pavimento %.2f%% "
-        "(dinamico ATRx%.1f) | STOPLOSS %s | INTERVAL %gs"
+        "Parametri: STOPSIZE $%.2f | ATR %dx%.2f (Buy 1.0x) | MSIZE %.2f | "
+        "PERC_STABLE %.2f | PERC_COIN %.2f | MAX_LOSS %.2f%% "
+        "(dinamico ATRx%.1f) | TIMEOUT %gs"
         % (
             strategy_params["stop_floor"],
             strategy_params["atr_period"],
@@ -619,11 +533,10 @@ def print_report(timeframe, period_label, result, start_cash, last_price, strate
             strategy_params["perc_coin"],
             strategy_params["max_loss_pct"] * 100,
             strategy_params["hard_stop_atr_mult"],
-            strategy_params["stoploss"],
-            strategy_params["interval"],
+            strategy_params["trail_buy_timeout"],
         )
     )
-    print("Trade totali:          %d (BUY: %d | SELL: %d | STOP: %d)"
+    print("Trade totali:          %d (BUY: %d | SELL/TP: %d | STOP: %d)"
           % (len(trades), n_buy, n_sell, n_hard_stop))
     print("Win rate (uscite):     %.1f%% (%d/%d)" % (win_rate, wins, len(sell_trades)))
     print("PnL realizzato (uscite): $%.2f" % wallet.realized_pnl_usd)
@@ -633,8 +546,7 @@ def print_report(timeframe, period_label, result, start_cash, last_price, strate
     print("Rendimento totale:     %+.2f%%" % total_return_pct)
     print("Max drawdown:          $%.2f (%.2f%%)" % (dd_usd, dd_pct))
     if result["pending_trail"]:
-        print("ATTENZIONE: un trail (%s) non si è mai risolto entro i dati disponibili "
-              "(iniziato all'indice %d) — probabile a fine periodo di backtest."
+        print("ATTENZIONE: un trail (%s) era ancora in corso a fine dati (indice %d)."
               % (result["pending_trail"]["type"], result["pending_trail"]["start_idx"]))
     print("")
 
@@ -669,16 +581,14 @@ def save_trades_csv(path, trades):
         for t in trades:
             time_utc = datetime.fromtimestamp(t["time"] / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             writer.writerow([t["idx"], t["time"], time_utc, t["type"],
-                              round(t["price"], 4), round(t["sz"], 6),
-                              round(t["fee"], 4), round(t["pnl"], 4) if t["pnl"] is not None else ""])
+                             round(t["price"], 4), round(t["sz"], 6),
+                             round(t["fee"], 4), round(t["pnl"], 4) if t["pnl"] is not None else ""])
 
 
 # ==================================================================
 # MAIN
 # ==================================================================
-
 def load_params(path):
-    """Legge lo stesso formato KEY=VALUE usato da jbmainMacd.py."""
     params = {}
     with open(path) as f:
         for line in f:
@@ -691,25 +601,18 @@ def load_params(path):
 
 
 def param_value(cli_value, params, key, default, converter):
-    """Il parametro CLI ha precedenza, poi hype.txt, poi il default."""
     if cli_value is not None:
         return cli_value
     return converter(params.get(key, default))
+
 
 def main():
     parser = argparse.ArgumentParser(description="Backtest offline HYPE Trailing MACD Bot")
     parser.add_argument("--file", default="hype.txt", help="File parametri del bot (default: hype.txt)")
     parser.add_argument("--symbol", default=None)
-    parser.add_argument("--days", type=int, default=30,
-                         help="Ultimi N giorni da adesso. Ignorato se si usano --start-date/--end-date.")
-    parser.add_argument("--start-date", default=None,
-                         help="Data inizio UTC (YYYY-MM-DD). Va usato insieme a --end-date per pinnare "
-                              "una finestra di calendario fissa, cosi' due run in momenti diversi (es. "
-                              "5m oggi, 15m domani) guardano ESATTAMENTE lo stesso storico e sono "
-                              "confrontabili. Senza questi due argomenti, --days calcola 'ultimi N "
-                              "giorni da adesso', che si sposta ad ogni esecuzione.")
-    parser.add_argument("--end-date", default=None,
-                         help="Data fine UTC (YYYY-MM-DD), esclusiva. Va usato insieme a --start-date.")
+    parser.add_argument("--days", type=int, default=30)
+    parser.add_argument("--start-date", default=None)
+    parser.add_argument("--end-date", default=None)
     parser.add_argument("--timeframes", default="1m,5m,15m")
     parser.add_argument("--perc-stable", type=float, default=None)
     parser.add_argument("--perc-coin", type=float, default=None)
@@ -721,6 +624,7 @@ def main():
     parser.add_argument("--hard-stop-atr-mult", type=float, default=None)
     parser.add_argument("--stoploss", choices=("y", "n"), default=None)
     parser.add_argument("--adx-threshold", type=float, default=None)
+    parser.add_argument("--trail-buy-timeout", type=float, default=None)
     parser.add_argument("--start-cash", type=float, default=None)
     args = parser.parse_args()
 
@@ -732,15 +636,16 @@ def main():
     args.symbol = param_value(args.symbol, params, "SYMBOL", "HYPE", str)
     args.perc_stable = param_value(args.perc_stable, params, "PERC_STABLE", 0.20, float)
     args.perc_coin = param_value(args.perc_coin, params, "PERC_COIN", 0.5, float)
-    args.stop_floor = param_value(args.stop_floor, params, "STOPSIZE", 0.20, float)
-    args.multi_size = param_value(args.multi_size, params, "MSIZE", 3, float)
+    args.stop_floor = param_value(args.stop_floor, params, "STOPSIZE", 0.18, float)
+    args.multi_size = param_value(args.multi_size, params, "MSIZE", 2.0, float)
     args.atr_period = param_value(args.atr_period, params, "ATR_PERIOD", 14, int)
-    args.atr_mult = param_value(args.atr_mult, params, "ATR_MULT", 1.5, float)
-    args.max_loss_pct = param_value(args.max_loss_pct, params, "MAX_LOSS_PCT", 0.01, float)
+    args.atr_mult = param_value(args.atr_mult, params, "ATR_MULT", 1.8, float)
+    args.max_loss_pct = param_value(args.max_loss_pct, params, "MAX_LOSS_PCT", 0.008, float)
     if not 0 < args.max_loss_pct < 1:
-        parser.error("MAX_LOSS_PCT deve essere una frazione tra 0 e 1 (es. 0.01 = 1%)")
-    args.hard_stop_atr_mult = param_value(args.hard_stop_atr_mult, params, "HARD_STOP_ATR_MULT", 4.0, float)
+        parser.error("MAX_LOSS_PCT deve essere una frazione tra 0 e 1 (es. 0.008 = 0.8%)")
+    args.hard_stop_atr_mult = param_value(args.hard_stop_atr_mult, params, "HARD_STOP_ATR_MULT", 3.5, float)
     args.adx_threshold = param_value(args.adx_threshold, params, "ADX_THRESHOLD", 20.0, float)
+    args.trail_buy_timeout = param_value(args.trail_buy_timeout, params, "TRAIL_BUY_TIMEOUT", 1200.0, float)
     args.stoploss = param_value(args.stoploss, params, "STOPLOSS", "n", str).lower()
     args.interval = param_value(None, params, "INTERVAL", 4, float)
     args.start_cash = config.START_BALANCE_USD if args.start_cash is None else args.start_cash
@@ -755,13 +660,13 @@ def main():
         "max_loss_pct": args.max_loss_pct,
         "hard_stop_atr_mult": args.hard_stop_atr_mult,
         "adx_threshold": args.adx_threshold,
+        "trail_buy_timeout": args.trail_buy_timeout,
         "stoploss": args.stoploss,
         "interval": args.interval,
     }
 
     if (args.start_date is None) != (args.end_date is None):
         parser.error("--start-date e --end-date vanno usati insieme, non uno solo dei due")
-
     if args.start_date is not None:
         try:
             start_dt = datetime.strptime(args.start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -772,12 +677,6 @@ def main():
             parser.error("--end-date deve essere successiva a --start-date")
         start_ms = int(start_dt.timestamp() * 1000)
         end_ms = int(end_dt.timestamp() * 1000)
-        # Etichetta usata sia nei report a schermo sia nei nomi dei file di
-        # output: con date esplicite due run diversi (es. 5m e 15m) che
-        # usano la STESSA coppia --start-date/--end-date producono la
-        # STESSA etichetta, cosa che li rende confrontabili a colpo
-        # d'occhio - a differenza di "--days 30" dove l'etichetta è la
-        # stessa ma la finestra reale si sposta ad ogni esecuzione.
         period_label = "%s_%s" % (args.start_date, args.end_date)
     else:
         end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -785,17 +684,15 @@ def main():
         period_label = "%dd" % args.days
 
     timeframes = [t.strip() for t in args.timeframes.split(",") if t.strip()]
-
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    hl_util = Hyperliquid(real="n", market=args.symbol)  # solo per info/round_size/usd_to_size, nessuna chiave richiesta
+    hl_util = Hyperliquid(real="n", market=args.symbol)
 
     print("Scarico storico 15m (trend filter, condiviso da tutti i timeframe)...")
     trend_candles = hl_util.ohlcv_history(args.symbol, TREND_TIMEFRAME, start_ms, end_ms)
     print("  %d candele 15m" % len(trend_candles))
 
     summary_rows = []
-
     for tf in timeframes:
         print("\nScarico storico %s..." % tf)
         if tf == TREND_TIMEFRAME:
@@ -803,7 +700,6 @@ def main():
         else:
             candles = hl_util.ohlcv_history(args.symbol, tf, start_ms, end_ms)
         print("  %d candele %s" % (len(candles), tf))
-
         if len(candles) < LIMIT + 10:
             print("  Dati insufficienti per %s, salto." % tf)
             continue
@@ -813,20 +709,15 @@ def main():
             args.perc_stable, args.perc_coin, args.stop_floor, args.multi_size,
             args.atr_period, args.atr_mult, args.stoploss, args.max_loss_pct,
             args.hard_stop_atr_mult, adx_threshold=args.adx_threshold,
+            trail_buy_timeout=args.trail_buy_timeout, timeframe=tf,
             start_cash=args.start_cash,
         )
-
         last_price = candles[-1][4]
         summary = print_report(
             tf, period_label, result, args.start_cash, last_price, strategy_params,
         )
         summary_rows.append(summary)
 
-        # FIX: prima il nome era sempre "trades_<tf>.csv" (poi "trades_<tf>_<N>d.csv"),
-        # quindi due run con --days che si spostano nel tempo o con finestre
-        # diverse potevano sovrascriversi o essere difficili da confrontare.
-        # period_label distingue sia "--days N" sia le finestre pinnate con
-        # --start-date/--end-date.
         csv_path = os.path.join(OUTPUT_DIR, "trades_%s_%s.csv" % (tf, period_label))
         save_trades_csv(csv_path, result["trades"])
         print("Trade salvati in %s" % csv_path)
@@ -857,7 +748,6 @@ def main():
                     s["stoploss"], s["interval"],
                 )
             )
-
         summary_path = os.path.join(OUTPUT_DIR, "summary_%s.csv" % period_label)
         with open(summary_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))

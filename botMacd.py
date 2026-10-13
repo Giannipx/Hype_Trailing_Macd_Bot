@@ -1,6 +1,5 @@
 import time
 import datetime
-
 import config
 import indicators
 from hl import Hyperliquid
@@ -12,23 +11,22 @@ class CryptoBot:
     HYPE Trailing MACD Bot.
 
     Versione aggiornata con:
-    - filtro trend 15m per i BUY
+    - filtro trend 15m per i BUY (EMA200 + tenuta SMA20 + ADX)
+    - ingresso mean-reversion su ipervenduto estremo (RSI < 28)
+    - buyStopSize reattivo separato da sell stopSize
     - limite esposizione massima
     - massimo numero di ingressi
     - riarmo del setup BUY
-    - hard stop loss
+    - take profit parziale + break-even stop + hard stop loss dinamico
     """
 
     # ==========================================================
     # RISK MANAGEMENT
     # ==========================================================
-    # Non serve modificare config.py per questi tre parametri.
     MAX_POSITION_PCT = 0.50       # max 50% dell'equity in HYPE
     MAX_BUY_ENTRIES = 2           # max 2 BUY per ciclo di posizione
-    MAX_LOSS_PCT = 0.01           # hard stop: pavimento percentuale (usato solo se l'ATR è più stretto)
-    HARD_STOP_ATR_MULT = 4.0      # hard stop dinamico: ATR * questo moltiplicatore (deve restare più largo
-                                   # del trailing stop, che di norma usa atr_mult ~1.5-2.5x: l'hard stop è
-                                   # una rete di sicurezza rara, non l'uscita primaria della strategia)
+    MAX_LOSS_PCT = 0.01           # hard stop: pavimento percentuale (usato solo se l'ATR è stretto)
+    HARD_STOP_ATR_MULT = 4.0      # hard stop dinamico: ATR * questo moltiplicatore
 
     def __init__(
         self,
@@ -76,19 +74,14 @@ class CryptoBot:
         self.sma2_period = sma2_period
 
         # ------------------------------------------------------
-        # STOPSIZE ADATTIVO (ATR)
+        # STOPSIZE ADATTIVO (ATR) DIFFERENZIATO BUY / SELL
         # ------------------------------------------------------
-        # STOPSIZE da hype.txt diventa un PAVIMENTO di sicurezza, non più
-        # il valore usato direttamente: ad ogni ciclo self.stopSize viene
-        # ricalcolato come ATR(atr_period) * atr_mult sul timeframe
-        # operativo, con un minimo di stop_floor (il vecchio STOPSIZE
-        # statico) per evitare uno stop irrealisticamente stretto quando
-        # la volatilità recente è quasi nulla (es. mercato piatto di notte).
         self.stop_floor = stopSize
         self.atr_period = atr_period
         self.atr_mult = atr_mult
         self.atr = None
-        self.stopSize = stopSize  # valore iniziale, prima del primo calcolo ATR
+        self.stopSize = stopSize  # valore iniziale per SELL
+        self.buyStopSize = round(stopSize * 0.6, 4)  # valore iniziale più reattivo per BUY
         self.max_loss_pct = (
             self.MAX_LOSS_PCT
             if max_loss_pct is None
@@ -147,9 +140,6 @@ class CryptoBot:
         # RISK MANAGEMENT
         # ------------------------------------------------------
         self.buy_entries = 0
-
-        # Dopo un BUY il setup deve prima "scaricarsi"
-        # prima di consentire un nuovo BUY.
         self.buy_armed = True
 
         self._prompt_reset_paper()
@@ -158,11 +148,9 @@ class CryptoBot:
     # ==========================================================
     # PAPER WALLET RESET
     # ==========================================================
-
     def _prompt_reset_paper(self):
         if self.real == "y":
             return
-
         try:
             ans = input(
                 "Vuoi resettare il wallet paper "
@@ -170,7 +158,6 @@ class CryptoBot:
             )
         except EOFError:
             ans = ""
-
         if ans.strip().lower() == "y":
             self.wallet_binance.reset_balance()
 
@@ -181,7 +168,6 @@ class CryptoBot:
             )
         except EOFError:
             ans = ""
-
         if ans.strip().lower() == "y":
             with open(config.CRONO_FILE, "w"):
                 pass
@@ -190,7 +176,6 @@ class CryptoBot:
     # ==========================================================
     # BANNER
     # ==========================================================
-
     def print_banner(self):
         rete = (
             "MAINNET"
@@ -221,9 +206,8 @@ class CryptoBot:
         print("Coin:              %s" % self.market)
         print("Timeframe entry:   %s" % self.timeframe)
         print("Timeframe trend:   %s" % self.trend_timeframe)
-
         print(
-            "Trail Stop Size:   $%.2f (pavimento) "
+            "Trail Stop SELL:   $%.2f (pavimento) "
             "- adattivo via ATR(%d) x%.1f"
             % (
                 self.stop_floor,
@@ -231,7 +215,15 @@ class CryptoBot:
                 self.atr_mult,
             )
         )
-
+        print(
+            "Trail Stop BUY:    $%.2f (pavimento) "
+            "- adattivo via ATR(%d) x1.0 (timeout %gs)"
+            % (
+                self.stop_floor * 0.6,
+                self.atr_period,
+                self.trail_buy_timeout,
+            )
+        )
         print(
             "Sell Stop Trigger: $%.2f sotto il prezzo "
             "(stopz x %gx)"
@@ -240,22 +232,18 @@ class CryptoBot:
                 self.multiSize,
             )
         )
-
         print(
             "Intervallo Trail:  %gs"
             % self.interval
         )
-
         print(
             "Invest. Stable:    %.0f%% per buy"
             % (self.percStable * 100)
         )
-
         print(
             "Vendita Coin:      %.0f%% per sell"
             % (self.percCoin * 100)
         )
-
         print(
             "StopLoss Ordine:   %s"
             % (
@@ -264,29 +252,23 @@ class CryptoBot:
                 else "non attivo"
             )
         )
-
-        print("Filtro RSI:        buy < 55 | sell > 40")
-
+        print("Filtro RSI:        buy < 55 (sniper < 28) | sell > 40")
         print(
-            "Trend filter:      %s Price > EMA200 + ADX >= %.1f"
+            "Trend filter:      %s Price > EMA200 & >= SMA20 + ADX >= %.1f"
             % (self.trend_timeframe, self.adx_threshold)
         )
-
         print(
             "Risk max position: %.0f%% equity"
             % (self.MAX_POSITION_PCT * 100)
         )
-
         print(
             "Risk max BUY:      %d"
             % self.MAX_BUY_ENTRIES
         )
-
         print(
-            "Hard stop:         -%.2f%%"
-            % (self.max_loss_pct * 100)
+            "Hard stop:         -%.2f%% (dinamico ATR x%.1f)"
+            % (self.max_loss_pct * 100, self.hard_stop_atr_mult)
         )
-
         print(
             "Leva:              %gx (%s)"
             % (
@@ -296,17 +278,14 @@ class CryptoBot:
                 else "cross",
             )
         )
-
         print(
             "Fee (simulata):    %.3f%%"
             % (config.FEE_PCT * 100)
         )
-
         print(
             "Capitale Paper:    $%.2f"
             % config.START_BALANCE_USD
         )
-
         print("  Wallet iniziale (walletIniziale.txt):")
 
         for tok, val in (
@@ -317,7 +296,6 @@ class CryptoBot:
             print("    %s: %s" % (tok, val))
 
         pw = self.wallet_binance.paper_wallet_dump()
-
         print(
             "  Paper wallet: USDC: %.2f | %s: %.4f | "
             "entry: %.3f | PnL: %.2f | fee: %.2f | trade: %d"
@@ -331,7 +309,6 @@ class CryptoBot:
                 pw["n_trades"],
             )
         )
-
         print("=" * 60)
 
         if self.real == "y":
@@ -360,7 +337,6 @@ class CryptoBot:
     # ==========================================================
     # TREND FILTER
     # ==========================================================
-
     def calculate_trend_filter(self):
         trend_ohlcv = self.data_binance.ohlcv_data(
             self.market,
@@ -371,7 +347,6 @@ class CryptoBot:
         trend_closes = [c[4] for c in trend_ohlcv]
 
         min_required = 200
-
         if len(trend_closes) < min_required:
             raise ValueError(
                 "Dati insufficienti per trend %s: %d candele "
@@ -387,12 +362,10 @@ class CryptoBot:
             trend_closes,
             self.sma1_period,
         )
-
         trend_ema200 = indicators.ema(
             trend_closes,
             200,
         )
-        
         trend_adx = indicators.adx(
             trend_ohlcv,
             14,
@@ -409,10 +382,14 @@ class CryptoBot:
         self.trend_ema200 = trend_ema200
         self.trend_adx = trend_adx
 
+        # Trend Bullish: Prezzo 15m sopra EMA200, ADX in spinta, e prezzo
+        # non in fase di crollo sotto la SMA20 15m (tolleranza 0.3% per pullback sani)
         self.trend_bullish = (
             self.trend_price > self.trend_ema200
+            and self.trend_price >= (self.trend_sma1 * 0.997)
             and self.trend_adx >= self.adx_threshold
         )
+
         self.trend_bearish = (
             self.trend_price < self.trend_ema200
         )
@@ -422,34 +399,7 @@ class CryptoBot:
     # ==========================================================
     # HARD STOP LOSS
     # ==========================================================
-
     def check_hard_stop(self):
-        """
-        Chiude tutta la posizione se il prezzo scende troppo sotto il
-        prezzo medio di carico.
-
-        FIX: prima la distanza era una percentuale fissa (max_loss_pct,
-        es. 1% o 3%) uguale su qualunque timeframe. Ma l'escursione di
-        prezzo "normale" per candela è molto diversa tra 1m/5m/15m: la
-        stessa percentuale fissa può essere larghissima su un timeframe
-        (praticamente mai toccata) e strettissima su un altro (scatta
-        sul rumore normale, prima che il segnale MACD abbia la
-        possibilità di chiudere la posizione da solo) - è quello che
-        abbiamo osservato confrontando 1m/5m/15m con MAX_LOSS_PCT=0.03
-        fisso: win rate molto diverso non solo per qualità del segnale,
-        ma anche per quanto quel 3% fosse permissivo su ciascun
-        timeframe.
-
-        Ora la distanza è in dollari: max(pavimento percentuale su
-        max_loss_pct, ATR * hard_stop_atr_mult). Il pavimento evita uno
-        stop irrealisticamente stretto quando l'ATR crolla (mercato
-        piatto); hard_stop_atr_mult (default 4x, più largo del
-        moltiplicatore usato per il trailing stop) fa sì che l'hard stop
-        resti una rete di sicurezza rara che si allarga con la
-        volatilità reale, invece di una soglia fissa che il rumore
-        normale del timeframe può toccare spesso.
-        """
-
         if self.cryptoCoin <= 0:
             return False
 
@@ -457,18 +407,18 @@ class CryptoBot:
             return False
 
         coin_symbol = self.market.split("/")[0]
-        max_loss_pct = getattr(self, 'max_loss_pct', 0.01)
-        hard_stop_atr_mult = getattr(self, 'hard_stop_atr_mult', 4.0)
+        max_loss_pct = getattr(self, "max_loss_pct", 0.01)
+        hard_stop_atr_mult = getattr(self, "hard_stop_atr_mult", 4.0)
         floor_distance = self.priceMin * max_loss_pct
         atr_distance = (self.atr or 0) * hard_stop_atr_mult
-
         is_break_even = self.take_profit_hit
+
         if is_break_even:
-            # Sposta l'hard stop a break-even (prezzo di ingresso + piccolo margine)
-            stop_distance = - (self.priceMin * 0.002) 
+            # Sposta l'hard stop a break-even (prezzo di ingresso + 0.20%)
+            stop_distance = -(self.priceMin * 0.002)
         else:
             stop_distance = max(floor_distance, atr_distance)
-            
+
         stop_price = self.priceMin - stop_distance
 
         if self.price > stop_price:
@@ -519,8 +469,6 @@ class CryptoBot:
         stop_name = "BREAK-EVEN STOP" if is_break_even else "HARD STOP"
 
         try:
-            # Se esiste uno stop reale già aperto, cancellalo
-            # prima della chiusura manuale.
             if (
                 self.real == "y"
                 and self.stoplossorder == "y"
@@ -554,24 +502,20 @@ class CryptoBot:
                     "%s NON ESEGUITO: %s"
                     % (stop_name, result.get("error"))
                 )
-
                 self.data_binance.cronoMacdString(
                     "%s NON ESEGUITO" % stop_name,
                     result.get("error"),
                 )
-
                 return False
 
             fill_price = result.get(
                 "fill_price",
                 self.price,
             )
-
             pnl = result.get(
                 "pnl",
                 0.0,
             )
-
             fee = result.get(
                 "fee",
                 0.0,
@@ -606,7 +550,6 @@ class CryptoBot:
             self.buy_armed = True
             self.previous_histogram = None
             self.take_profit_hit = False
-
             self.wallet()
 
             return True
@@ -616,30 +559,27 @@ class CryptoBot:
                 "Errore %s: %s"
                 % (stop_name, e)
             )
-
             self.data_binance.cronoMacdString(
                 "ERRORE %s" % stop_name,
                 str(e),
             )
-
             return False
 
     # ==========================================================
     # TAKE PROFIT PARZIALE
     # ==========================================================
-
     def check_take_profit(self):
         if self.cryptoCoin <= 0 or self.priceMin <= 0:
             self.take_profit_hit = False
             return False
-            
+
         if self.take_profit_hit:
             return False
-            
+
         # Target: 1.5x ATR distance dal prezzo di ingresso
-        tp_distance = (self.atr or 0) * 1.5 
+        tp_distance = (self.atr or 0) * 1.5
         tp_price = self.priceMin + tp_distance
-        
+
         if self.price >= tp_price and tp_distance > 0:
             print("")
             print("=" * 60)
@@ -648,21 +588,21 @@ class CryptoBot:
             print("Prezzo corrente:   %.4f" % self.price)
             print("Target:            %.4f (+%.4f)" % (tp_price, tp_distance))
             print("=" * 60)
-            
+
             sell_amount = self.wallet_binance.round_size(
                 self.market.split("/")[0],
                 self.cryptoCoin * 0.5,
             )
             if sell_amount <= 0:
                 return False
-                
+
             try:
                 if self.real == "y" and self.stoplossorder == "y":
                     try:
                         self.wallet_binance.elimina_ordine(self.market)
-                    except Exception as e:
+                    except Exception:
                         pass
-                
+
                 result = self.wallet_binance.sell(self.market, sell_amount, self.price)
                 if result.get("filled", False):
                     self.take_profit_hit = True
@@ -682,27 +622,17 @@ class CryptoBot:
     # ==========================================================
     # BUY RISK FILTER
     # ==========================================================
-
     def can_open_buy(self):
-        """
-        Controlla:
-        - massimo numero di BUY;
-        - nuovo setup MACD;
-        - massima esposizione.
-        """
-
         if self.buy_entries >= self.MAX_BUY_ENTRIES:
             print(
                 "RISK FILTER [NO BUY] | "
                 "MAX_BUY_ENTRIES=%d"
                 % self.MAX_BUY_ENTRIES
             )
-
             self.data_binance.cronoMacdString(
                 "BUY BLOCCATO | MAX_BUY_ENTRIES | entries=%d"
                 % self.buy_entries
             )
-
             return False
 
         if not self.buy_armed:
@@ -710,26 +640,21 @@ class CryptoBot:
                 "RISK FILTER [NO BUY] | "
                 "SETUP NON RIARMATO"
             )
-
             self.data_binance.cronoMacdString(
                 "BUY BLOCCATO | SETUP NON RIARMATO"
             )
-
             return False
 
         position_value = (
             self.cryptoCoin * self.price
         )
-
         equity = (
             self.stableCoin
             + position_value
         )
-
         max_position = (
             equity * self.MAX_POSITION_PCT
         )
-
         next_buy_value = self.stableBot
 
         if (
@@ -739,17 +664,14 @@ class CryptoBot:
             print(
                 "RISK FILTER [NO BUY] | MAX POSITION"
             )
-
             print(
                 "  Posizione attuale: $%.2f"
                 % position_value
             )
-
             print(
                 "  Max posizione:     $%.2f"
                 % max_position
             )
-
             self.data_binance.cronoMacdString(
                 "BUY BLOCCATO | MAX_POSITION | "
                 "position=%.2f | max=%.2f"
@@ -758,7 +680,6 @@ class CryptoBot:
                     max_position,
                 )
             )
-
             return False
 
         return True
@@ -766,14 +687,7 @@ class CryptoBot:
     # ==========================================================
     # RIARMO BUY
     # ==========================================================
-
     def rearm_buy_setup_if_needed(self):
-        """
-        Un BUY disarma il setup.
-        Quando l'istogramma torna a peggiorare, il setup viene
-        considerato terminato e un nuovo BUY potrà essere cercato.
-        """
-
         if self.buy_armed:
             return
 
@@ -782,11 +696,9 @@ class CryptoBot:
 
         if self.last_histogram < self.previous_histogram:
             self.buy_armed = True
-
             print(
                 "BUY SETUP RIARMATO"
             )
-
             self.data_binance.cronoMacdString(
                 "BUY SETUP RIARMATO"
             )
@@ -794,16 +706,13 @@ class CryptoBot:
     # ==========================================================
     # RUN
     # ==========================================================
-
     def run(self):
         self.print_banner()
 
         while True:
-
             # --------------------------------------------------
             # SINCRONIZZAZIONE TIMEFRAME
             # --------------------------------------------------
-
             now = datetime.datetime.now(
                 datetime.timezone.utc
             )
@@ -812,54 +721,45 @@ class CryptoBot:
                 seconds_until_next_time = (
                     60 - now.second
                 )
-
             elif self.timeframe == "5s":
                 seconds_until_next_time = (
                     60 - now.second
                 )
-
             elif self.timeframe == "5m":
                 cinque_minuti = (
                     now.minute
                     + 5
                     - (now.minute % 5)
                 )
-
                 seconds_until_next_time = (
                     (cinque_minuti - now.minute) * 60
                     - now.second
                 )
-
             elif self.timeframe == "15m":
                 quindici_minuti = (
                     now.minute
                     + 15
                     - (now.minute % 15)
                 )
-
                 seconds_until_next_time = (
                     (quindici_minuti - now.minute) * 60
                     - now.second
                 )
-
             elif self.timeframe == "30m":
                 trenta_minuti = (
                     now.minute
                     + 30
                     - (now.minute % 30)
                 )
-
                 seconds_until_next_time = (
                     (trenta_minuti - now.minute) * 60
                     - now.second
                 )
-
             elif self.timeframe == "1h":
                 seconds_until_next_time = (
                     3600
                     - (now.minute * 60 + now.second)
                 )
-
             else:
                 seconds_until_next_time = 0
 
@@ -881,14 +781,12 @@ class CryptoBot:
             # --------------------------------------------------
             # DATI + INDICATORI
             # --------------------------------------------------
-
             try:
                 ohlcv = self.data_binance.ohlcv_data(
                     self.market,
                     self.timeframe,
                     limit=self.limit,
                 )
-
                 closes = [c[4] for c in ohlcv]
 
                 min_richieste = max(
@@ -907,7 +805,6 @@ class CryptoBot:
                             min_richieste,
                         )
                     )
-
                     self.data_binance.cronoMacdString(
                         "SKIP ciclo: solo %d candele "
                         "ricevute (minimo %d)"
@@ -916,28 +813,23 @@ class CryptoBot:
                             min_richieste,
                         )
                     )
-
                     continue
 
                 macd_line, signal_line, histogram = (
                     indicators.macd_series(closes)
                 )
-
                 rsi_values = indicators.rsi(
                     closes,
                     self.rsi_period,
                 )
-
                 sma1 = indicators.sma(
                     closes,
                     self.sma1_period,
                 )
-
                 sma2 = indicators.sma(
                     closes,
                     self.sma2_period,
                 )
-
                 atr_value = indicators.atr(
                     ohlcv,
                     self.atr_period,
@@ -956,31 +848,28 @@ class CryptoBot:
                         "Indicatori non calcolabili. "
                         "Salto ciclo."
                     )
-
                     self.data_binance.cronoMacdString(
                         "SKIP ciclo: indicatori "
                         "non calcolabili"
                     )
-
                     continue
 
                 self.last_macd = macd_line[-1]
                 self.last_signal = signal_line[-1]
                 self.last_histogram = histogram[-1]
                 self.last_rsi = rsi_values
-
                 self.sma1 = round(sma1, 2)
                 self.sma2 = round(sma2, 2)
 
-                # FIX: STOPSIZE adattivo. self.stop_floor è il vecchio
-                # valore statico da hype.txt, usato come minimo per evitare
-                # uno stop troppo stretto quando l'ATR crolla (mercato
-                # piatto). atr_mult amplifica la volatilità recente per
-                # dare margine al trailing stop di respirare senza essere
-                # toccato dal rumore normale.
                 self.atr = atr_value
+                # StopSize per SELL: più largo (atr_mult, es. 1.8x) per lasciar correre il trend
                 self.stopSize = round(
                     max(self.stop_floor, self.atr * self.atr_mult),
+                    4,
+                )
+                # StopSize per BUY: più stretto (1.0x ATR, floor 60%) per entrare sul rimbalzo entro il timeout
+                self.buyStopSize = round(
+                    max(self.stop_floor * 0.6, self.atr * 1.0),
                     4,
                 )
 
@@ -996,7 +885,6 @@ class CryptoBot:
                     "(rete/API/indicatori): %s"
                     % e
                 )
-
                 try:
                     self.data_binance.cronoMacdString(
                         "ERRORE ciclo principale: %s"
@@ -1004,28 +892,22 @@ class CryptoBot:
                     )
                 except Exception:
                     pass
-
                 continue
 
             # --------------------------------------------------
             # HARD STOP
             # --------------------------------------------------
-
             if self.check_hard_stop():
                 continue
-                
+
             # --------------------------------------------------
             # TAKE PROFIT
             # --------------------------------------------------
-
             if self.check_take_profit():
                 continue
 
             # --------------------------------------------------
-            # TREND FLIP EXIT (opzionale, default "n"):
-            # chiudi posizione se trend 15m gira bearish (Price < EMA200).
-            # Disattivato di default per evitare chiusure immediate in perdita
-            # su normali oscillazioni del prezzo, lasciando lavorare Take Profit e Hard Stop.
+            # TREND FLIP EXIT (opzionale, default "n")
             # --------------------------------------------------
             if self.cryptoCoin > 0 and self.trend_flip_exit == "y":
                 if self.trend_bearish:
@@ -1094,6 +976,7 @@ class CryptoBot:
                                 )
                                 pnl = result.get("pnl", 0.0)
                                 fee = result.get("fee", 0.0)
+
                                 self.data_binance.cronoMacdString(
                                     "TREND FLIP EXIT | Entry %.4f | "
                                     "Fill %.4f | PnL %.4f | Fee %.4f"
@@ -1131,13 +1014,12 @@ class CryptoBot:
             # --------------------------------------------------
             # LOG
             # --------------------------------------------------
-
             self.data_binance.cronoMacdString(
                 "TRAIL MULTIPLER x%s | Price: %s | "
                 "MACD: %.5f | Signal: %.5f | "
                 "Histo: %.5f | RSI: %.2f | "
                 "SMA20: %.2f | SMA50: %.2f | "
-                "ATR: %.4f | StopSize: %.4f | "
+                "ATR: %.4f | StopSize: %.4f | BuyStop: %.4f | "
                 "TREND15m Price: %.4f | "
                 "TREND15m SMA20: %.4f | "
                 "TREND15m EMA200: %.4f | "
@@ -1157,6 +1039,7 @@ class CryptoBot:
                     self.sma2,
                     self.atr,
                     self.stopSize,
+                    self.buyStopSize,
                     self.trend_price,
                     self.trend_sma1,
                     self.trend_ema200,
@@ -1175,22 +1058,18 @@ class CryptoBot:
 
             print("********** WALLET [%s] *************"
                   % self.walletType)
-
             print(
                 "TRAIL NEW MULTIPLER [%s]"
                 % self.multiSize
             )
-
             print(
                 "Timeframe entry: [%s]"
                 % self.timeframe
             )
-
             print(
                 "Timeframe trend: [%s]"
                 % self.trend_timeframe
             )
-
             print("UTC:", now)
 
             prev_h = (
@@ -1209,7 +1088,6 @@ class CryptoBot:
                     self.last_signal,
                 )
             )
-
             print(
                 "  RSI (%s periodi): %.2f "
                 "SMA20: %.2f - SMA50: %.2f"
@@ -1220,19 +1098,16 @@ class CryptoBot:
                     self.sma2,
                 )
             )
-
             print(
-                "  ATR(%d): %.4f - StopSize adattivo: "
-                "%.4f (pavimento: %.4f, x%.1f)"
+                "  ATR(%d): %.4f - SellStop: %.4f (x%.1f) | BuyStop: %.4f (x1.0)"
                 % (
                     self.atr_period,
                     self.atr,
                     self.stopSize,
-                    self.stop_floor,
                     self.atr_mult,
+                    self.buyStopSize,
                 )
             )
-
             print(
                 "  TREND %s: Price %.4f | SMA20 %.4f | "
                 "EMA200 %.4f | ADX %.1f | BULLISH=%s"
@@ -1245,7 +1120,6 @@ class CryptoBot:
                     self.trend_bullish,
                 )
             )
-
             print(
                 "Last price: %s - Prezzo Medio: %s"
                 % (
@@ -1253,7 +1127,6 @@ class CryptoBot:
                     self.priceMin,
                 )
             )
-
             print(
                 "  %s Wallet %s: %.2f - %s: %s [%s]"
                 % (
@@ -1267,7 +1140,6 @@ class CryptoBot:
             )
 
             pw = self.wallet_binance.paper_wallet_dump()
-
             print(
                 "  Paper wallet: entry %.3f | PnL %.2f | "
                 "fee %.2f | trade %d"
@@ -1278,7 +1150,6 @@ class CryptoBot:
                     pw["n_trades"],
                 )
             )
-
             print(
                 "  Bot Wallet %s: %.2f - %s: %s [%s]"
                 % (
@@ -1289,7 +1160,6 @@ class CryptoBot:
                     self.cryptoCoinOrder,
                 )
             )
-
             print(
                 "BUY: %s - SELL: %s | "
                 "BUY entries: %d/%d | armed: %s"
@@ -1301,22 +1171,18 @@ class CryptoBot:
                     self.buy_armed,
                 )
             )
-
             print("*********************************************")
             print("")
 
             # --------------------------------------------------
             # RIARMO SETUP
             # --------------------------------------------------
-
             self.rearm_buy_setup_if_needed()
 
             # --------------------------------------------------
             # SEGNALI MACD
             # --------------------------------------------------
-
             if self.previous_histogram is not None:
-
                 diff = round(
                     self.last_histogram
                     - self.previous_histogram,
@@ -1326,14 +1192,12 @@ class CryptoBot:
                 # ==============================================
                 # AUMENTO POSITIVO
                 # ==============================================
-
                 if (
                     self.last_macd > self.last_signal
                     and self.last_histogram
                     > self.previous_histogram
                 ):
                     trend = "MACD: Aumento positivo"
-
                     print(
                         trend,
                         "[no]"
@@ -1342,29 +1206,24 @@ class CryptoBot:
                 # ==============================================
                 # DIMINUZIONE POSITIVO -> SELL
                 # ==============================================
-
                 elif (
                     self.last_macd > self.last_signal
                     and self.last_histogram
                     < self.previous_histogram
                 ):
-
                     print(
                         "Differenza: %s"
                         % diff
                     )
-
                     trend = (
                         "MACD: Diminuzione positivo"
                     )
-
                     print(
                         trend,
                         "[ok]"
                     )
 
                     if self.last_rsi > 40:
-
                         print(
                             "RSI positivo [ok]"
                         )
@@ -1373,20 +1232,16 @@ class CryptoBot:
                             self.cryptoCoin
                             * self.price
                         ) > 10:
-
                             print(
                                 "Wallet Crypto [ok]"
                             )
 
-                            # Vincolo rimosso: vendiamo anche in perdita se c'è segnale MACD
                             if True:
-
                                 print(
                                     "Vincolo prezzo medio rimosso [ok]"
                                 )
 
                                 if self.trailSell:
-
                                     self.data_binance.cronoMacd(
                                         now,
                                         self.last_histogram,
@@ -1396,43 +1251,32 @@ class CryptoBot:
                                         self.last_rsi,
                                         "sell",
                                     )
-
                                     task = StopTrail(
                                         self.market,
                                         "sell",
                                         self.stopSize,
                                         self.interval,
                                         self.multiSize,
-                                        self.percStable,
+                                        self.stableBot,
                                         self.percCoin,
                                         self.real,
                                         self.stoplossorder,
                                         self.wallet_binance,
                                         self.data_binance,
                                     )
-
                                     task.run()
-
                                     self.wallet()
 
-                                    # Se la posizione è stata
-                                    # completamente chiusa,
-                                    # il prossimo setup riparte
-                                    # da zero.
                                     if self.cryptoCoin <= 0:
                                         self.buy_entries = 0
                                         self.buy_armed = True
                                         self.previous_histogram = None
-
                                 else:
                                     print(
                                         "trailSell False"
                                     )
-
-
                         else:
                             print("zero coin")
-
                     else:
                         print(
                             "RSI negativo [no]"
@@ -1441,43 +1285,36 @@ class CryptoBot:
                 # ==============================================
                 # DIMINUZIONE NEGATIVO -> BUY
                 # ==============================================
-
                 elif (
                     self.last_macd < self.last_signal
                     and self.last_histogram
                     > self.previous_histogram
                 ):
-
                     print(
                         "Differenza: %s"
                         % diff
                     )
-
                     trend = (
                         "MACD: Diminuzione negativo"
                     )
-
                     print(
                         trend,
                         "[ok]"
                     )
 
                     if self.last_rsi < 55:
-
                         print(
                             "RSI negativo [ok]"
                         )
 
                         # --------------------------------------
-                        # TREND 15m
+                        # TREND 15m OPPURE SNIPER OVERSOLD (<28)
                         # --------------------------------------
-
-                        if not self.trend_bullish:
-
+                        oversold_reversal = (self.last_rsi < 28.0)
+                        if not (self.trend_bullish or oversold_reversal):
                             print(
                                 "TREND FILTER [NO BUY]"
                             )
-
                             print(
                                 "  Price %s: %.4f"
                                 % (
@@ -1485,7 +1322,6 @@ class CryptoBot:
                                     self.trend_price,
                                 )
                             )
-
                             print(
                                 "  SMA20 %s: %.4f"
                                 % (
@@ -1493,7 +1329,6 @@ class CryptoBot:
                                     self.trend_sma1,
                                 )
                             )
-
                             print(
                                 "  EMA200 %s: %.4f"
                                 % (
@@ -1501,7 +1336,6 @@ class CryptoBot:
                                     self.trend_ema200,
                                 )
                             )
-
                             print(
                                 "  ADX %s: %.1f"
                                 % (
@@ -1509,7 +1343,6 @@ class CryptoBot:
                                     self.trend_adx,
                                 )
                             )
-
                             self.data_binance.cronoMacdString(
                                 "BUY BLOCCATO | "
                                 "Trend %s non bullish | "
@@ -1525,7 +1358,11 @@ class CryptoBot:
                             )
 
                         elif self.stableCoin > 10:
-
+                            if oversold_reversal and not self.trend_bullish:
+                                print("SNIPER OVERSOLD [RSI %.2f < 28] -> BUY consentito sotto EMA200" % self.last_rsi)
+                                self.data_binance.cronoMacdString(
+                                    "SNIPER OVERSOLD ATTIVO | RSI %.2f < 28" % self.last_rsi
+                                )
                             print(
                                 "Wallet Stable >10 [ok]"
                             )
@@ -1533,12 +1370,9 @@ class CryptoBot:
                             # ----------------------------------
                             # RISK MANAGEMENT
                             # ----------------------------------
-
                             if not self.can_open_buy():
                                 pass
-
                             elif self.trailBuy:
-
                                 self.data_binance.cronoMacd(
                                     now,
                                     self.last_histogram,
@@ -1548,11 +1382,10 @@ class CryptoBot:
                                     self.last_rsi,
                                     "buy",
                                 )
-
                                 task = StopTrail(
                                     self.market,
                                     "buy",
-                                    self.stopSize,
+                                    self.buyStopSize,
                                     self.interval,
                                     self.multiSize,
                                     self.stableBot,
@@ -1563,26 +1396,19 @@ class CryptoBot:
                                     self.data_binance,
                                     max_duration=self.trail_buy_timeout,
                                 )
-
                                 task.run()
-
                                 self.wallet()
 
-                                # Il BUY viene considerato
-                                # eseguito solo se la posizione
-                                # è effettivamente presente.
                                 if (
                                     self.cryptoCoin > 0
                                     and self.priceMin > 0
                                 ):
                                     self.buy_entries += 1
                                     self.buy_armed = False
-
                                     print(
                                         "RISK | BUY entry #%d"
                                         % self.buy_entries
                                     )
-
                                     self.data_binance.cronoMacdString(
                                         "RISK | BUY entry #%d | "
                                         "entry %.4f | size %.4f"
@@ -1592,17 +1418,14 @@ class CryptoBot:
                                             self.cryptoCoin,
                                         )
                                     )
-
                             else:
                                 print(
                                     "trailBuy False"
                                 )
-
                         else:
                             print(
                                 "zero stableCoin [no]"
                             )
-
                     else:
                         print(
                             "RSI positivo [no]"
@@ -1611,34 +1434,28 @@ class CryptoBot:
                 # ==============================================
                 # AUMENTO NEGATIVO
                 # ==============================================
-
                 elif (
                     self.last_macd < self.last_signal
                     and self.last_histogram
                     < self.previous_histogram
                 ):
-
                     print(
                         "Differenza: %s"
                         % diff
                     )
-
                     trend = (
                         "MACD: Aumento negativo"
                     )
-
                     print(
                         trend,
                         "[no]"
                     )
-
             else:
                 trend = "N/A"
 
             # --------------------------------------------------
             # MEMORIZZA HISTOGRAM
             # --------------------------------------------------
-
             self.previous_histogram = (
                 self.last_histogram
             )
@@ -1646,49 +1463,38 @@ class CryptoBot:
     # ==========================================================
     # WALLET
     # ==========================================================
-
     def wallet(self):
         self.price = self.data_binance.get_price(
             self.market
         )
-
         self.cryptoName = self.market
         self.stableName = "USDC"
 
         if self.real == "y":
-
             self.walletType = "Real"
-
             self.stableCoin = (
                 self.wallet_binance.get_balance(
                     "USDC"
                 )
             )
-
             self.cryptoCoin = (
                 self.wallet_binance.get_balance(
                     self.cryptoName
                 )
             )
-
             self.cryptoCoinOrder = (
                 self.wallet_binance.get_balance_order(
                     self.cryptoName
                 )
             )
-
         else:
-
             self.walletType = "Test"
-
             self.stableCoin = (
                 self.wallet_binance.read_balance(0)
             )
-
             self.cryptoCoin = (
                 self.wallet_binance.read_balance(1)
             )
-
             self.cryptoCoinOrder = (
                 self.wallet_binance.get_balance_order(
                     self.cryptoName
@@ -1696,20 +1502,20 @@ class CryptoBot:
             )
 
         # Position Sizing Dinamico basato sul rischio all'Hard Stop
-        if hasattr(self, 'price') and hasattr(self, 'atr') and hasattr(self, 'max_loss_pct'):
+        if hasattr(self, "price") and hasattr(self, "atr") and hasattr(self, "max_loss_pct"):
             equity = self.stableCoin + (self.cryptoCoin * self.price)
             risk_amount_usd = equity * self.max_loss_pct
-            
+
             atr_dist = (self.atr or 0) * self.hard_stop_atr_mult
             floor_dist = self.price * self.max_loss_pct
             stop_dist = max(floor_dist, atr_dist)
-            
+
             if stop_dist > 0:
                 coins = risk_amount_usd / stop_dist
                 target_usd = coins * self.price
-                
+
                 max_allowed = self.stableCoin * 0.95
-                max_position_limit = equity * getattr(self, 'MAX_POSITION_PCT', 0.50)
+                max_position_limit = equity * getattr(self, "MAX_POSITION_PCT", 0.50)
                 current_position_value = (self.cryptoCoin * self.price) if self.cryptoCoin > 0 else 0
                 remaining_allowance = max(0, max_position_limit - current_position_value)
 
@@ -1719,10 +1525,10 @@ class CryptoBot:
         else:
             self.stableBot = round(self.stableCoin * self.percStable, 2)
 
-        self.coinBot = round(
-            self.cryptoCoin
-            * self.percCoin,
-            2,
+        coin_symbol = self.market.split("/")[0]
+        self.coinBot = self.wallet_binance.round_size(
+            coin_symbol,
+            self.cryptoCoin * self.percCoin,
         )
 
         # Fonte unica del prezzo medio:
@@ -1741,8 +1547,7 @@ class CryptoBot:
             self.trailSell = False
             self.take_profit_hit = False
 
-        # BUY trailing disponibile se abbiamo
-        # almeno 10 USDC investibili.
+        # BUY trailing disponibile se abbiamo almeno 10 USDC investibili
         if self.stableBot > 10:
             self.trailBuy = True
         else:
