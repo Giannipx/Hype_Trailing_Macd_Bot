@@ -26,7 +26,7 @@ class CryptoBot:
     MAX_POSITION_PCT = 0.50       # max 50% dell'equity in HYPE
     MAX_BUY_ENTRIES = 2           # max 2 BUY per ciclo di posizione
     MAX_LOSS_PCT = 0.01           # hard stop: pavimento percentuale (usato solo se l'ATR è stretto)
-    HARD_STOP_ATR_MULT = 4.0      # hard stop dinamico: ATR * questo moltiplicatore
+    HARD_STOP_ATR_MULT = 2.0      # hard stop dinamico: ATR * questo moltiplicatore (bilanciato con TP 1.5x)
 
     def __init__(
         self,
@@ -48,9 +48,10 @@ class CryptoBot:
         atr_mult=1.5,
         max_loss_pct=None,
         hard_stop_atr_mult=None,
-        adx_threshold=20.0,
-        trail_buy_timeout=900,
+        adx_threshold=14.0,
+        trail_buy_timeout=1200,
         trend_flip_exit="n",
+        time_stop_minutes=60.0,
     ):
         # Wallet / ordini
         self.wallet_binance = Hyperliquid(
@@ -129,6 +130,8 @@ class CryptoBot:
             else 900.0
         )
         self.trend_flip_exit = str(trend_flip_exit).strip().lower()
+        self.time_stop_seconds = float(time_stop_minutes) * 60.0 if time_stop_minutes else 3600.0
+        self.entry_time = None
         self.trailBuy = False
         self.trailSell = False
         self.take_profit_hit = False
@@ -383,10 +386,10 @@ class CryptoBot:
         self.trend_adx = trend_adx
 
         # Trend Bullish: Prezzo 15m sopra EMA200, ADX in spinta, e prezzo
-        # non in fase di crollo sotto la SMA20 15m (tolleranza 0.3% per pullback sani)
+        # non in fase di crollo sotto la SMA20 15m (tolleranza 1.5% per pullback sani)
         self.trend_bullish = (
             self.trend_price > self.trend_ema200
-            and self.trend_price >= (self.trend_sma1 * 0.997)
+            and self.trend_price >= (self.trend_sma1 * 0.985)
             and self.trend_adx >= self.adx_threshold
         )
 
@@ -618,6 +621,86 @@ class CryptoBot:
             except Exception as e:
                 print("Errore TAKE PROFIT: %s" % e)
         return False
+
+    # ==========================================================
+    # USCITA TECNICA ANTICIPATA (TIME/MOMENTUM INVALIDATION)
+    # ==========================================================
+    def check_technical_exit(self):
+        """
+        Uscita tecnica anticipata / invalidazione del trade:
+        Se la posizione e aperta da piu di time_stop_seconds (default 60 min),
+        il prezzo e sotto il prezzo medio di acquisto (in perdita),
+        e il MACD a 5m conferma un deterioramento ribassista (histogram < previous_histogram e last_rsi < 48),
+        allora esce a mercato per tagliare la perdita prima dell'Hard Stop.
+        """
+        if self.cryptoCoin <= 0 or self.priceMin <= 0:
+            return False
+
+        if not hasattr(self, "entry_time") or self.entry_time is None:
+            return False
+
+        elapsed = time.time() - self.entry_time
+        time_limit = getattr(self, "time_stop_seconds", 3600.0)
+
+        is_stagnant_loss = (
+            elapsed >= time_limit
+            and self.price < self.priceMin
+            and self.last_histogram is not None
+            and self.previous_histogram is not None
+            and self.last_histogram < self.previous_histogram
+            and getattr(self, "last_rsi", 50.0) < 48.0
+        )
+
+        if not is_stagnant_loss:
+            return False
+
+        print("")
+        print("=" * 60)
+        print("!!! USCITA TECNICA ANTICIPATA (TIME/MOMENTUM INVALIDATION) !!!")
+        print("Durata trade:       %.1f min" % (elapsed / 60))
+        print("Prezzo medio:       %.4f" % self.priceMin)
+        print("Prezzo corrente:    %.4f" % self.price)
+        loss_pct = (((self.price - self.priceMin) / self.priceMin) * 100) if self.priceMin > 0 else 0
+        print("Perdita parziale:   %.2f%%" % loss_pct)
+        print("=" * 60)
+
+        coin_symbol = self.market.split("/")[0]
+        try:
+            if self.real == "y" and self.stoplossorder == "y":
+                try:
+                    self.wallet_binance.elimina_ordine(self.market)
+                except Exception as e:
+                    print("Avviso cancellazione SL: %s" % e)
+
+            amount = self.wallet_binance.round_size(coin_symbol, self.cryptoCoin)
+            if amount <= 0:
+                return False
+
+            result = self.wallet_binance.sell(self.market, amount, self.price)
+            if not result.get("filled", False):
+                print("USCITA TECNICA NON ESEGUITA: %s" % result.get("error"))
+                return False
+
+            fill_price = result.get("fill_price", self.price)
+            pnl = result.get("pnl", 0.0)
+            fee = result.get("fee", 0.0)
+
+            self.data_binance.cronoMacdString(
+                "USCITA TECNICA | Entry %.4f | Fill %.4f | PnL %.4f | Fee %.4f | Durata %.0fm"
+                % (self.priceMin, fill_price, pnl, fee, elapsed / 60)
+            )
+
+            self.buy_entries = 0
+            self.buy_armed = True
+            self.previous_histogram = None
+            self.take_profit_hit = False
+            self.entry_time = None
+            self.wallet()
+            return True
+
+        except Exception as e:
+            print("Errore USCITA TECNICA: %s" % e)
+            return False
 
     # ==========================================================
     # BUY RISK FILTER
@@ -904,6 +987,12 @@ class CryptoBot:
             # TAKE PROFIT
             # --------------------------------------------------
             if self.check_take_profit():
+                continue
+
+            # --------------------------------------------------
+            # USCITA TECNICA ANTICIPATA (TIME/MOMENTUM)
+            # --------------------------------------------------
+            if self.check_technical_exit():
                 continue
 
             # --------------------------------------------------
@@ -1271,6 +1360,7 @@ class CryptoBot:
                                         self.buy_entries = 0
                                         self.buy_armed = True
                                         self.previous_histogram = None
+                                        self.entry_time = None
                                 else:
                                     print(
                                         "trailSell False"
@@ -1405,6 +1495,8 @@ class CryptoBot:
                                 ):
                                     self.buy_entries += 1
                                     self.buy_armed = False
+                                    if getattr(self, "entry_time", None) is None:
+                                        self.entry_time = time.time()
                                     print(
                                         "RISK | BUY entry #%d"
                                         % self.buy_entries
@@ -1546,6 +1638,7 @@ class CryptoBot:
         else:
             self.trailSell = False
             self.take_profit_hit = False
+            self.entry_time = None
 
         # BUY trailing disponibile se abbiamo almeno 10 USDC investibili
         if self.stableBot > 10:

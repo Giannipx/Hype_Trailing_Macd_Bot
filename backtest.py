@@ -133,7 +133,7 @@ def trend_bullish_at(trend_candles, trend_close_times, as_of_ms, adx_threshold=2
     trend_price = closes[-1]
     bullish = (
         trend_price > ema200
-        and trend_price >= (sma1 * 0.997)
+        and trend_price >= (sma1 * 0.985)
         and adx_val >= adx_threshold
     )
     return bullish, {"price": trend_price, "sma1": sma1, "ema200": ema200, "adx": adx_val}

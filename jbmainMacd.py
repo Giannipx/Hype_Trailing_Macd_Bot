@@ -34,21 +34,25 @@ def main(options):
     # Hard stop dinamico via ATR: distanza = max(priceMin*max_loss_pct, ATR*hard_stop_atr_mult).
     # max_loss_pct diventa quindi un PAVIMENTO percentuale, non più il valore
     # diretto - stessa logica già usata per STOPSIZE/atr_mult sul trailing.
-    hard_stop_atr_mult = float(myObject.get('HARD_STOP_ATR_MULT', 4.0))
+    hard_stop_atr_mult = float(myObject.get('HARD_STOP_ATR_MULT', 2.0))
 
-    # Soglia minima ADX per il trend bullish su timeframe superiore (default: 20.0)
-    adx_threshold = float(myObject.get('ADX_THRESHOLD', 20.0))
+    # Soglia minima ADX per il trend bullish su timeframe superiore (default: 14.0)
+    adx_threshold = float(myObject.get('ADX_THRESHOLD', 14.0))
 
-    # Timeout di invalidazione del trailing BUY in secondi (default: 900s = 15m)
-    trail_buy_timeout = float(myObject.get('TRAIL_BUY_TIMEOUT', 900.0))
+    # Timeout di invalidazione del trailing BUY in secondi (default: 1200s = 20m)
+    trail_buy_timeout = float(myObject.get('TRAIL_BUY_TIMEOUT', 1200.0))
 
     # Chiusura forzata se trend 15m gira bearish (default: n)
     trend_flip_exit = str(myObject.get('TREND_FLIP_EXIT', 'n')).strip().lower()
 
+    # Timeout uscita tecnica su stallo/inversione (default: 60 minuti)
+    time_stop_minutes = float(myObject.get('TIME_STOP_MINUTES', 60.0))
+
     bot = CryptoBot(symbol, stopSize, interval, timeframe, multiSize, percStable, percCoin, real, stoplossorder,
                      atr_period=atr_period, atr_mult=atr_mult, max_loss_pct=max_loss_pct,
                      hard_stop_atr_mult=hard_stop_atr_mult, adx_threshold=adx_threshold,
-                     trail_buy_timeout=trail_buy_timeout, trend_flip_exit=trend_flip_exit)
+                     trail_buy_timeout=trail_buy_timeout, trend_flip_exit=trend_flip_exit,
+                     time_stop_minutes=time_stop_minutes)
     bot.run()
 
 if __name__ == "__main__":
