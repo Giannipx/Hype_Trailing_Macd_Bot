@@ -666,14 +666,18 @@ class Hyperliquid:
         try:
             coin = self._coin(market)
             sz = self.round_size(coin, amount)
+            stop_px = float(f"{float(stop_price):.5g}")
+            # Per trigger market sell, HL richiede comunque un limit_px (es. -3% di slippage max)
+            slip_px = float(f"{stop_px * 0.97:.5g}")
             result = self.exchange.order(
                 name=coin,
                 is_buy=False,
                 sz=sz,
+                limit_px=slip_px,
                 order_type={
                     "trigger": {
                         "isMarket": True,
-                        "triggerPx": str(stop_price),
+                        "triggerPx": stop_px,
                         "tpsl": "sl",
                     }
                 },
@@ -695,14 +699,18 @@ class Hyperliquid:
         try:
             coin = self._coin(market)
             sz = self.round_size(coin, amount)
+            stop_px = float(f"{float(stop_price):.5g}")
+            # Per trigger market buy, limit_px a +3% di slippage max
+            slip_px = float(f"{stop_px * 1.03:.5g}")
             result = self.exchange.order(
                 name=coin,
                 is_buy=True,
                 sz=sz,
+                limit_px=slip_px,
                 order_type={
                     "trigger": {
                         "isMarket": True,
-                        "triggerPx": str(stop_price),
+                        "triggerPx": stop_px,
                         "tpsl": "sl",
                     }
                 },

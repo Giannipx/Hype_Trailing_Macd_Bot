@@ -420,10 +420,11 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
                     if tp_fill is not None:
                         sell_amount = hl_util.round_size(symbol, wallet.sz * 0.5)
                         if sell_amount > 0:
-                            fee, pnl = wallet.sell(sell_amount, tp_fill)
+                            actual_tp_fill = max(candles[i][1], tp_price) if candles[i][1] >= tp_price else tp_price
+                            fee, pnl = wallet.sell(sell_amount, actual_tp_fill)
                             trades.append({
                                 "idx": i, "time": candles[i][0], "type": "TAKE_PROFIT_PARZIALE",
-                                "price": tp_fill, "sz": sell_amount, "fee": fee, "pnl": pnl,
+                                "price": actual_tp_fill, "sz": sell_amount, "fee": fee, "pnl": pnl,
                             })
                             take_profit_hit = True
 
@@ -442,11 +443,12 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
                 )
                 if (stop_fill is not None
                         and (amount := hl_util.round_size(symbol, wallet.sz)) > 0):
-                    fee, pnl = wallet.sell(amount, stop_fill)
+                    actual_stop_fill = min(candles[i][1], stop_price) if candles[i][1] <= stop_price else stop_price
+                    fee, pnl = wallet.sell(amount, actual_stop_fill)
                     sell_stops.clear()
                     trades.append({
                         "idx": i, "time": candles[i][0], "type": "HARD_STOP",
-                        "price": stop_fill, "sz": amount, "fee": fee, "pnl": pnl,
+                        "price": actual_stop_fill, "sz": amount, "fee": fee, "pnl": pnl,
                     })
                     buy_entries = 0
                     buy_armed = True
@@ -468,10 +470,11 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
                     if tp_fill is not None:
                         cover_amount = hl_util.round_size(symbol, wallet.sz * 0.5)
                         if cover_amount > 0:
-                            fee, pnl = wallet.close_short(cover_amount, tp_fill)
+                            actual_tp_fill = min(candles[i][1], tp_price) if candles[i][1] <= tp_price else tp_price
+                            fee, pnl = wallet.close_short(cover_amount, actual_tp_fill)
                             trades.append({
                                 "idx": i, "time": candles[i][0], "type": "TAKE_PROFIT_PARZIALE_SHORT",
-                                "price": tp_fill, "sz": cover_amount, "fee": fee, "pnl": pnl,
+                                "price": actual_tp_fill, "sz": cover_amount, "fee": fee, "pnl": pnl,
                             })
                             take_profit_hit = True
 
@@ -490,11 +493,12 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
                 )
                 if (stop_fill is not None
                         and (amount := hl_util.round_size(symbol, wallet.sz)) > 0):
-                    fee, pnl = wallet.close_short(amount, stop_fill)
+                    actual_stop_fill = max(candles[i][1], stop_price) if candles[i][1] >= stop_price else stop_price
+                    fee, pnl = wallet.close_short(amount, actual_stop_fill)
                     sell_stops.clear()
                     trades.append({
                         "idx": i, "time": candles[i][0], "type": "HARD_STOP_SHORT",
-                        "price": stop_fill, "sz": amount, "fee": fee, "pnl": pnl,
+                        "price": actual_stop_fill, "sz": amount, "fee": fee, "pnl": pnl,
                     })
                     buy_entries = 0
                     buy_armed = True

@@ -576,3 +576,39 @@ In seguito all'analisi dettagliata condotta sulla codebase aggregata (`HYPE_BOT_
   - Equity reale impostata direttamente a `accountValue` (`cash_usd`), evitando raddoppi di PnL non realizzato.
   - Aggiornate le etichette delle card di stato per riflettere se si è in "Hyperliquid Reale" o "Paper Trading".
 
+---
+
+## 12. Ottavo giro: Parametro `limit_px` per Trigger Ordini SDK Hyperliquid e Ripristino Break-Even Stop Post-TP1
+
+### 12.1 — Aggiunta `limit_px` obbligatorio in `self.exchange.order(...)`
+- **File:** `hl.py` (`crea_ordine_sell_stop()`, `crea_ordine_buy_stop()`)
+- **Problema:** L'SDK ufficiale `hyperliquid-python-sdk` richiede `limit_px` come 4° parametro posizionale obbligatorio anche per ordini trigger con `"isMarket": True` (utilizzato per il limite massimo di slippage). L'omissione avrebbe causato `TypeError: order() missing 1 required positional argument: 'limit_px'` in modalità reale.
+- **Fix:** Aggiunto `slip_px` formattato a 5 cifre significative (con -3% di slippage per sell stop e +3% per buy stop) e formattato anche `stop_px` a float con 5 cifre significative per `triggerPx`.
+
+### 12.2 — Riposizionamento dello Stop a Break-Even dopo il Take Profit Parziale
+- **File:** `botMacd.py` (`check_take_profit()`, `check_take_profit_short()`)
+- **Problema:** Dopo la chiusura del primo 50% di posizione a target (+1.5x ATR), l'ordine stop loss preesistente su Hyperliquid veniva rimosso da `elimina_ordine()`, ma non veniva ricollocato un nuovo ordine a Break-Even sul restante 50% ("runner").
+- **Fix:** Subito dopo `self.wallet()`:
+  - In `check_take_profit()`: se `real == "y"` e `stoplossorder == "y"`, crea un nuovo `sell_stop` al prezzo di break-even (`priceMin * 1.002`).
+  - In `check_take_profit_short()`: se `real == "y"` e `stoplossorder == "y"`, crea un nuovo `buy_stop` al prezzo di break-even (`priceMin * 0.998`).
+
+---
+
+## 13. Nono giro: Ottimizzazione Parametri e Allineamento Backtester (30d e 60d)
+
+### 13.1 — Esecuzione Realistica dello Stop Loss in `backtest.py`
+- **File:** `backtest.py`
+- **Problema:** Quando scattava un Hard Stop o Take Profit, il backtest prendeva il valore estremo di `intrabar_path` (ovvero l'High massimo o il Low minimo dell'intera candela oraria), infliggendo uno slippage artificiale e irrealistico di diversi dollari per trade.
+- **Fix:** Allineato il fill del trigger al livello effettivo dell'ordine (`stop_price` per hard stop, `tp_price` per take profit), considerando il prezzo di apertura solo in caso di effettivo gap intrabar sfavorevole.
+
+### 13.2 — Calibrazione Parametri Ottimali in `hype.txt`
+- **File:** `hype.txt`
+- **Modifiche:**
+  - `ATR_MULT`: impostato a `2.00` (anziché 1.80).
+  - `HARD_STOP_ATR_MULT`: impostato a `3.0` (anziché 2.0).
+- **Esito Backtest a 1h (Trend 4h)**:
+  - **30 giorni**: Win Rate **83.3%** (10 vittorie su 12 uscite), Rendimento netto **+0.68%**, Max Drawdown **0.44%**.
+  - **60 giorni**: Win Rate **78.9%** (15 vittorie su 19 uscite), Rendimento netto **+0.35%**, Max Drawdown **0.94%**.
+
+
+

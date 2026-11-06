@@ -644,6 +644,9 @@ class CryptoBot:
                         "TAKE PROFIT PARZIALE 50%% | Fill %.4f | PnL %.4f" % (fill_price, pnl)
                     )
                     self.wallet()
+                    if self.real == "y" and self.stoplossorder == "y" and self.cryptoCoin > 0:
+                        be_price = round(self.priceMin * 1.002, 4)
+                        self.wallet_binance.crea_ordine_sell_stop(self.market, self.cryptoCoin, be_price, be_price)
                     return True
                 else:
                     print("TAKE PROFIT NON ESEGUITO: %s" % result.get("error"))
@@ -844,6 +847,9 @@ class CryptoBot:
                         "TAKE PROFIT PARZIALE SHORT 50%% | Fill %.4f | PnL %.4f" % (fill_price, pnl)
                     )
                     self.wallet()
+                    if self.real == "y" and self.stoplossorder == "y" and self.cryptoCoin > 0:
+                        be_price = round(self.priceMin * 0.998, 4)
+                        self.wallet_binance.crea_ordine_buy_stop(self.market, self.cryptoCoin, be_price, be_price)
                     return True
                 else:
                     print("TAKE PROFIT SHORT NON ESEGUITO: %s" % result.get("error"))
