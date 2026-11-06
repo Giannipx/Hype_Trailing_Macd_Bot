@@ -20,6 +20,7 @@ Attenzione (perp):
 """
 import json
 import os
+import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -124,7 +125,7 @@ class Hyperliquid:
         """
         interval = self._map_interval(timeframe)
         seconds = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
-                   "1h": 3600, "2h": 7200, "4h": 14400}.get(interval, 60)
+                   "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400}.get(interval, 60)
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         fetch_limit = limit + 1 if closed_only else limit
         res = self.info.candles_snapshot(
@@ -160,7 +161,7 @@ class Hyperliquid:
         """
         interval = self._map_interval(timeframe)
         seconds = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
-                   "1h": 3600, "2h": 7200, "4h": 14400}.get(interval, 60)
+                   "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400}.get(interval, 60)
 
         out = []
         seen_t = set()
@@ -220,6 +221,7 @@ class Hyperliquid:
             "1h": "1h",
             "2h": "2h",
             "4h": "4h",
+            "1d": "1d",
         }
         if timeframe not in tf:
             raise ValueError(f"timeframe {timeframe} non supportato su Hyperliquid")
@@ -520,15 +522,9 @@ class Hyperliquid:
                 return norm
             d = self._load_paper()
             fee = sz * price * config.FEE_PCT
-            old_sz = float(d["sz"])
+            old_sz = float(d["sz"]) if (d.get("side") == "LONG" and d.get("entry_is_real", True)) else 0.0
             d["cash_usd"] = float(d["cash_usd"]) - sz * price - fee
-            # FIX: se il saldo esistente (old_sz) era solo marcato a mercato
-            # all'avvio (entry_is_real=False, saldo "gratuito" senza un vero
-            # costo), non ha senso fare la media ponderata tra un prezzo
-            # inventato e questo buy vero: si azzera la media e riparte dal
-            # prezzo di QUESTO buy. Da qui in poi entry_is_real=True e le
-            # medie ponderate sui buy successivi sono corrette.
-            if old_sz > 0 and d.get("entry_is_real", True):
+            if old_sz > 0:
                 d["entry_px"] = ((float(d["entry_px"]) * old_sz) + (price * sz)) / (old_sz + sz)
             else:
                 d["entry_px"] = price
@@ -601,8 +597,8 @@ class Hyperliquid:
                 return norm
             d = self._load_paper()
             fee = sz * price * config.FEE_PCT
-            old_sz = float(d["sz"])
-            if old_sz > 0 and d.get("side") == "SHORT" and d.get("entry_is_real", True):
+            old_sz = float(d["sz"]) if (d.get("side") == "SHORT" and d.get("entry_is_real", True)) else 0.0
+            if old_sz > 0:
                 d["entry_px"] = ((float(d["entry_px"]) * old_sz) + (price * sz)) / (old_sz + sz)
             else:
                 d["entry_px"] = price
@@ -689,6 +685,35 @@ class Hyperliquid:
             print("Errore Sell Stop Hyperliquid:", e)
             return None
 
+    def crea_ordine_buy_stop(self, market, amount, stop_price, limit_price):
+        """Trigger buy stop (reduce_only) per chiudere lo short se il prezzo sale.
+        isMarket=True: esecuzione garantita appena il trigger viene toccato.
+        Solo reale (in paper: solo log)."""
+        if not self.exchange:
+            self.cronoMacdString("PAPER Buy Stop (solo log)", market, amount, stop_price, limit_price)
+            return None
+        try:
+            coin = self._coin(market)
+            sz = self.round_size(coin, amount)
+            result = self.exchange.order(
+                name=coin,
+                is_buy=True,
+                sz=sz,
+                order_type={
+                    "trigger": {
+                        "isMarket": True,
+                        "triggerPx": str(stop_price),
+                        "tpsl": "sl",
+                    }
+                },
+                reduce_only=True,
+            )
+            self.cronoMacdString("Creo Buy Stop HL", result)
+            return result
+        except Exception as e:
+            print("Errore Buy Stop Hyperliquid:", e)
+            return None
+
     def _open_orders(self):
         if not self.exchange:
             return []
@@ -717,8 +742,7 @@ class Hyperliquid:
             return
         coin = self._coin(market)
         try:
-            address = self.account_address or self.exchange.wallet.address
-            state = self.info.user_state(address)
+            state = self._get_user_state()
             szi = 0.0
             for ap in state.get("assetPositions", []):
                 if ap.get("position", {}).get("coin") == coin:

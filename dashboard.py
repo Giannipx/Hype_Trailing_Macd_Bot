@@ -130,14 +130,22 @@ except Exception as e:
     st.error("Errore inizializzazione Hyperliquid: %s" % e)
     st.stop()
 
-bal = read_paper_wallet()
 init = read_token_file("walletIniziale.txt")
-cash_usd = float(bal.get("cash_usd", 0.0))
-sz_pos = float(bal.get("sz", 0.0))
-side = bal.get("side", "FLAT") if real != "y" else hl.get_position_side(symbol)
+if real == "y":
+    cash_usd = hl.get_balance("USDC")
+    sz_pos = hl.get_balance(symbol)
+    price_min = hl.get_entry_price(symbol)
+    side = hl.get_position_side(symbol)
+    bal = {}
+else:
+    bal = read_paper_wallet()
+    cash_usd = float(bal.get("cash_usd", 0.0))
+    sz_pos = float(bal.get("sz", 0.0))
+    price_min = float(bal.get("entry_px", 0.0))
+    side = bal.get("side", "FLAT") if sz_pos > 1e-5 else "FLAT"
+
 if sz_pos <= 1e-5:
     side = "FLAT"
-price_min = read_ciclostart()
 
 # ---------- dati live (prezzi + candele) ----------
 mids = {}
@@ -170,7 +178,9 @@ for tok, amt in [("USDC", cash_usd), (symbol, sz_pos)]:
         "Valore USD": fmt_usd(usd),
     })
 
-if side == "SHORT":
+if real == "y":
+    equity = cash_usd
+elif side == "SHORT":
     unrealized = (price_min - (price or 0.0)) * sz_pos if price_min > 0 else 0.0
     equity = cash_usd + unrealized
 elif side == "LONG":
@@ -232,12 +242,12 @@ st.caption("%s | %s | Coin: %s | Timeframe: %s" % (modalita, rete, symbol, timef
 # ---------- riga metriche principali ----------
 c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
 c1.metric("Prezzo HYPE", fmt_price(price))
-c2.metric("Capitale Paper (USD)", fmt_usd(equity))
+c2.metric("Capitale Paper (USD)" if real != "y" else "Equity Conto (USD)", fmt_usd(equity))
 c3.metric("USDC", fmt_usd(stable_coin))
 c4.metric("Posizione (%s)" % side, "%g %s" % (crypto_coin, symbol))
-c5.metric("PnL realizzato", fmt_usd(bal.get("realized_pnl_usd")))
-c6.metric("Fee totali", fmt_usd(bal.get("fees_usd")))
-c7.metric("Trade", bal.get("n_trades", 0))
+c5.metric("PnL realizzato", fmt_usd(bal.get("realized_pnl_usd")) if real != "y" else "-")
+c6.metric("Fee totali", fmt_usd(bal.get("fees_usd")) if real != "y" else "-")
+c7.metric("Trade", bal.get("n_trades", 0) if real != "y" else "-")
 c8.metric("RSI (14)", "%.2f" % last_rsi if last_rsi is not None else "-")
 
 tab_wallet, tab_prezzo, tab_log = st.tabs(["Wallet e saldi", "Prezzo e indicatori", "Attività (log)"])
@@ -246,7 +256,7 @@ tab_wallet, tab_prezzo, tab_log = st.tabs(["Wallet e saldi", "Prezzo e indicator
 # TAB 1 - WALLET E SALDI
 # ============================================================
 with tab_wallet:
-    st.subheader("Saldo attuale (paper_wallet.json)")
+    st.subheader("Saldo attuale (%s)" % ("Hyperliquid Reale" if real == "y" else "paper_wallet.json"))
     st.dataframe(pd.DataFrame(token_rows), hide_index=True)
     st.caption("Valore USD calcolato a prezzo live di mercato.")
 
@@ -259,7 +269,7 @@ with tab_wallet:
         paper_rows = [
             {"Campo": "Cash USDC", "Valore": fmt_usd(bal.get("cash_usd"))},
             {"Campo": "Posizione HYPE", "Valore": "%g" % bal.get("sz", 0.0)},
-            {"Campo": "Prezzo medio entry", "Valore": fmt_price(bal.get("entry_px"))},
+            {"Campo": "Prezzo medio entry", "Valore": fmt_price(price_min)},
             {"Campo": "PnL realizzato", "Valore": fmt_usd(bal.get("realized_pnl_usd"))},
             {"Campo": "Fee totali", "Valore": fmt_usd(bal.get("fees_usd"))},
             {"Campo": "Trade eseguiti", "Valore": bal.get("n_trades", 0)},
@@ -269,7 +279,7 @@ with tab_wallet:
         st.subheader("Stato trail (inferito)")
         trail_rows = [
             {"Stato": "Side posizione", "Valore": side},
-            {"Stato": "Prezzo medio entry", "Valore": fmt_price(bal.get("entry_px"))},
+            {"Stato": "Prezzo medio entry", "Valore": fmt_price(price_min)},
             {"Stato": "trailBuy (Long)", "Valore": trail_buy},
             {"Stato": "trailShort (Short)", "Valore": trail_short},
             {"Stato": "trailSell (Exit Long)", "Valore": trail_sell},

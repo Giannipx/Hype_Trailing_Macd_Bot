@@ -496,3 +496,83 @@ In seguito all'analisi dettagliata condotta sulla codebase aggregata (`HYPE_BOT_
 ### 9.8 — Supporto SHORT in `dashboard.py`
 - **File:** `dashboard.py`
 - **Fix:** Calcolo dell'equity corretto per le posizioni SHORT (`cash + unrealized_pnl`), badge visivo del side (`LONG`, `SHORT`, `FLAT`) e monitoraggio degli stati `trail_short` e `trail_cover`.
+
+---
+
+## 10. Sesto giro: Rifinitura Finale, Bugfix Reale e Allineamento Backtester
+
+### 10.1 — Bug Critico Bloccante in Modalità Reale (`REAL=y`)
+- **File:** `hl.py`
+- **Problema:** L'implementazione di `_get_user_state()` chiamava `time.time()`, ma in cima a `hl.py` mancava `import time`. In paper trading il metodo non veniva chiamato, ma passando a `REAL=y` sollevava `NameError`, intercettato dai blocchi `try/except` che azzeravano silenziosamente saldo, side ed entry price. Inoltre, `verifica_ordini()` faceva una chiamata diretta a `user_state` senza sfruttare la cache.
+- **Fix:** Aggiunto `import time` e aggiornato `verifica_ordini()` per utilizzare la chiamata cached `self._get_user_state()`.
+
+### 10.2 — Allineamento `TIME_STOP_MINUTES` su Timeframe 1h
+- **File:** `hype.txt`
+- **Problema:** Con `TIMEFRAME=1h`, mantenere `TIME_STOP_MINUTES=60` faceva scattare il controllo di stallo/uscita tecnica già alla primissima candela dopo l'ingresso, liquidando anzitempo posizioni in fisiologico pullback iniziale.
+- **Fix:** Impostato `TIME_STOP_MINUTES=240` (equivalente a 4 candele orarie), offrendo il tempo necessario alla strategia di validare il momentum.
+
+### 10.3 — Gestione Simmetrica di `TREND_FLIP_EXIT` per Posizioni SHORT
+- **File:** `botMacd.py`
+- **Problema:** Il blocco `TREND_FLIP_EXIT` gestiva solo posizioni Long controllando `if self.cryptoCoin > 0 and self.trend_bearish: self.wallet_binance.sell(...)`. Con uno short aperto (dove `trend_bearish` è la norma), se attivato avrebbe tentato di chiudere la posizione chiamando erroneamente `sell()` anziché `close_short()`.
+- **Fix:** Separati i rami:
+  - `position_side == "LONG"` e trend diventa `trend_bearish` -> esegue `sell()`.
+  - `position_side == "SHORT"` e trend diventa `trend_bullish` -> esegue `close_short()`.
+  In entrambi i casi lo stato del trade (`buy_entries`, `buy_armed`, `take_profit_hit`, `entry_time`) viene opportunamente azzerato.
+
+### 10.4 — Multi-Timeframe e Trend Filter Dinamico in `backtest.py`
+- **File:** `backtest.py`, `hl.py`
+- **Problema:** `backtest.py` aveva `TREND_TIMEFRAME = "15m"` hardcoded, quindi testando il timeframe `1h` filtrava i trade con trend a 15m anziché a 4h come `botMacd.py`. Inoltre `TF_SECONDS` non includeva `3m`, `2h`, `4h`, `1d`.
+- **Fix:**
+  - Aggiunti intervalli `3m`, `2h`, `4h`, `1d` a `TF_SECONDS` e `hl.py`.
+  - Creata funzione `resolve_trend_tf(tf, custom_trend)` che mappa dinamicamente `1h -> 4h`, `5m -> 15m`, ecc.
+  - Implementato caching dei trend candles (`trend_candles_cache`) con warmup buffer di 250 candele per calcolare in modo accurato l'EMA200 iniziale.
+  - Aggiunto parametro CLI `--trend-timeframe`.
+
+### 10.5 — Allineamento e Modernizzazione di `optimize.py`
+- **File:** `optimize.py`
+- **Problema:** Calcolava il PnL finale sommando arbitrariamente `cash + sz * px` (errato per posizioni short), non passava `enable_short=True` a `run_backtest`, filtrava solo le uscite LONG e non supportava il timeframe 1h.
+- **Fix:**
+  - Sostituito il calcolo dell'equity con `wallet.equity()`.
+  - Conteggiati tutti i trade conclusi con `t.get("pnl") is not None`.
+  - Aggiunti parametri CLI `--timeframe`, `--trend-timeframe` e `--enable-short`.
+  - Risoluzione automatica del trend filter per il timeframe impostato.
+
+### 10.6 — Allineamento Log e Output Console in `botMacd.py`
+- **File:** `botMacd.py`
+- **Fix:** Resa dinamica la stringa dei log (`TREND%s` invece del testo fisso `TREND15m`) e aggiunto `BEARISH=%s` alla stampa a console del trend.
+
+---
+
+## 11. Settimo giro: Rifinitura Casi Limite (Wallet Iniziale, Stop Loss Hardware, Sync Universale e Dashboard)
+
+### 11.1 — Pulizia `walletIniziale.txt` e Protezione Eredità Size su Nuove Posizioni
+- **File:** `walletIniziale.txt`, `hl.py` (`buy()`, `open_short()`)
+- **Problema:** `walletIniziale.txt` conteneva `HYPE: 20` (placeholder iniziale). In paper trading, aprendo uno SHORT, `open_short` accumulava `old_sz + sz`, ereditando i 20 token e gonfiando la prima size short.
+- **Fix:**
+  - In `walletIniziale.txt`: azzerati i token placeholder (`HYPE: 0.0`, `BTC: 0.0`, `ETH: 0.0`), lasciando solo `USDC: 1000`.
+  - In `hl.py`: `buy()` e `open_short()` considerano `old_sz` solo se la posizione esistente coincide con lo stesso lato (`LONG` per buy, `SHORT` per short) e `entry_is_real=True`. Entrando da `FLAT`, la nuova size riparte sempre esattamente da `sz`.
+
+### 11.2 — Supporto Completo `STOPLOSS=y` su Hyperliquid per LONG e SHORT
+- **File:** `hl.py`, `trailMacd.py`, `botMacd.py`
+- **Problema:** Mancava l'invio del sell stop dopo un BUY in `trailMacd.py` e non esisteva una funzione per creare buy stop di protezione per le posizioni SHORT.
+- **Fix:**
+  - Aggiunto `crea_ordine_buy_stop(market, amount, stop_price, limit_price)` in `hl.py` (trigger order reale con `is_buy=True`, `isMarket=True`, `reduce_only=True`).
+  - In `trailMacd.py`: dopo l'esecuzione di un `buy` crea il `sell_stop`; dopo l'esecuzione di uno `short` crea il `buy_stop`. Su `cover` o `sell` cancella gli ordini residui via `elimina_ordine()`.
+  - In `botMacd.py`: `elimina_ordine()` viene invocato coerentemente anche nei blocchi di `check_hard_stop_short()`, `check_take_profit_short()` e `check_technical_exit_short()`.
+
+### 11.3 — Sincronizzazione Oraria Universale nel Loop Principale
+- **File:** `botMacd.py` (`run()`)
+- **Problema:** La catena di 35+ righe di `if/elif` gestiva solo alcuni timeframe rigidi; impostando ad esempio `TIMEFRAME=4h` o `2h` si finiva nell'`else: seconds_until_next_time = 0`, facendo ciclare il loop ogni 2 secondi.
+- **Fix:** Sostituita l'intera catena con calcolo matematico esatto su timestamp UTC:
+  `tf_sec = tf_sec_map.get(self.timeframe, 3600)`
+  `seconds_until_next_time = tf_sec - (int(now.timestamp()) % tf_sec)`
+  Funziona su qualsiasi timeframe supportato (`5s`, `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `1d`) garantendo allineamento al secondo esatto di chiusura candela.
+
+### 11.4 — Visualizzazione Corretta in `dashboard.py` in Modalità Reale (`REAL=y`)
+- **File:** `dashboard.py`
+- **Problema:** In modalità reale il saldo e la posizione venivano letti comunque da `paper_wallet.json` anziché dall'API Hyperliquid, e `price_min` da `fileCicloStart.txt` anziché dall'`entry_price` di posizione reale.
+- **Fix:**
+  - Se `real == "y"`: `cash_usd` legge `hl.get_balance("USDC")`, `sz_pos` legge `hl.get_balance(symbol)`, `price_min` legge `hl.get_entry_price(symbol)` e `side` legge `hl.get_position_side(symbol)`.
+  - Equity reale impostata direttamente a `accountValue` (`cash_usd`), evitando raddoppi di PnL non realizzato.
+  - Aggiornate le etichette delle card di stato per riflettere se si è in "Hyperliquid Reale" o "Paper Trading".
+

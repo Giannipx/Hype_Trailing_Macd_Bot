@@ -766,6 +766,12 @@ class CryptoBot:
         print("=" * 60)
 
         try:
+            if self.real == "y" and self.stoplossorder == "y":
+                try:
+                    self.wallet_binance.elimina_ordine(self.market)
+                except Exception as e:
+                    print("Avviso cancellazione SL: %s" % e)
+
             amount = self.wallet_binance.round_size(coin_symbol, self.cryptoCoin)
             if amount <= 0:
                 return False
@@ -822,6 +828,12 @@ class CryptoBot:
                 return False
 
             try:
+                if self.real == "y" and self.stoplossorder == "y":
+                    try:
+                        self.wallet_binance.elimina_ordine(self.market)
+                    except Exception:
+                        pass
+
                 result = self.wallet_binance.close_short(self.market, sell_amount, self.price)
                 if result.get("filled", False):
                     self.take_profit_hit = True
@@ -876,6 +888,12 @@ class CryptoBot:
 
         coin_symbol = self.market.split("/")[0]
         try:
+            if self.real == "y" and self.stoplossorder == "y":
+                try:
+                    self.wallet_binance.elimina_ordine(self.market)
+                except Exception as e:
+                    print("Avviso cancellazione SL: %s" % e)
+
             amount = self.wallet_binance.round_size(coin_symbol, self.cryptoCoin)
             if amount <= 0:
                 return False
@@ -1002,51 +1020,21 @@ class CryptoBot:
                 datetime.timezone.utc
             )
 
-            if self.timeframe == "1m":
-                seconds_until_next_time = (
-                    60 - now.second
-                )
-            elif self.timeframe == "5s":
-                seconds_until_next_time = (
-                    60 - now.second
-                )
-            elif self.timeframe == "5m":
-                cinque_minuti = (
-                    now.minute
-                    + 5
-                    - (now.minute % 5)
-                )
-                seconds_until_next_time = (
-                    (cinque_minuti - now.minute) * 60
-                    - now.second
-                )
-            elif self.timeframe == "15m":
-                quindici_minuti = (
-                    now.minute
-                    + 15
-                    - (now.minute % 15)
-                )
-                seconds_until_next_time = (
-                    (quindici_minuti - now.minute) * 60
-                    - now.second
-                )
-            elif self.timeframe == "30m":
-                trenta_minuti = (
-                    now.minute
-                    + 30
-                    - (now.minute % 30)
-                )
-                seconds_until_next_time = (
-                    (trenta_minuti - now.minute) * 60
-                    - now.second
-                )
-            elif self.timeframe == "1h":
-                seconds_until_next_time = (
-                    3600
-                    - (now.minute * 60 + now.second)
-                )
-            else:
-                seconds_until_next_time = 0
+            tf_sec_map = {
+                "5s": 60,
+                "1m": 60,
+                "3m": 180,
+                "5m": 300,
+                "15m": 900,
+                "30m": 1800,
+                "1h": 3600,
+                "2h": 7200,
+                "4h": 14400,
+                "1d": 86400,
+            }
+            tf_sec = tf_sec_map.get(self.timeframe, 3600)
+            now_ts = int(now.timestamp())
+            seconds_until_next_time = tf_sec - (now_ts % tf_sec)
 
             if seconds_until_next_time > 0:
                 time.sleep(seconds_until_next_time)
@@ -1203,13 +1191,23 @@ class CryptoBot:
             # TREND FLIP EXIT (opzionale, default "n")
             # --------------------------------------------------
             if self.cryptoCoin > 0 and self.trend_flip_exit == "y":
-                if self.trend_bearish:
+                should_exit = False
+                flip_type = None
+                if self.position_side == "LONG" and self.trend_bearish:
+                    should_exit = True
+                    flip_type = "BEARISH (Price < EMA200)"
+                elif self.position_side == "SHORT" and self.trend_bullish:
+                    should_exit = True
+                    flip_type = "BULLISH (Price > EMA200)"
+
+                if should_exit:
                     print("")
                     print("=" * 60)
-                    print("!!! TREND FLIP BEARISH (Price < EMA200) - CHIUSURA POSIZIONE !!!")
+                    print("!!! TREND FLIP %s - CHIUSURA POSIZIONE %s !!!" % (flip_type, self.position_side))
                     print(
-                        "Trend 15m: Price %.4f | SMA20 %.4f | EMA200 %.4f | ADX %.1f"
+                        "Trend %s: Price %.4f | SMA20 %.4f | EMA200 %.4f | ADX %.1f"
                         % (
+                            self.trend_timeframe,
                             self.trend_price,
                             self.trend_sma1,
                             self.trend_ema200,
@@ -1217,8 +1215,9 @@ class CryptoBot:
                         )
                     )
                     print(
-                        "Posizione: %.4f %s @ entry %.4f"
+                        "Posizione %s: %.4f %s @ entry %.4f"
                         % (
+                            self.position_side,
                             self.cryptoCoin,
                             self.cryptoName,
                             self.priceMin,
@@ -1247,11 +1246,18 @@ class CryptoBot:
                         )
 
                         if amount > 0:
-                            result = self.wallet_binance.sell(
-                                self.market,
-                                amount,
-                                self.price,
-                            )
+                            if self.position_side == "LONG":
+                                result = self.wallet_binance.sell(
+                                    self.market,
+                                    amount,
+                                    self.price,
+                                )
+                            else:
+                                result = self.wallet_binance.close_short(
+                                    self.market,
+                                    amount,
+                                    self.price,
+                                )
 
                             if not result.get("filled", False):
                                 print(
@@ -1271,9 +1277,10 @@ class CryptoBot:
                                 fee = result.get("fee", 0.0)
 
                                 self.data_binance.cronoMacdString(
-                                    "TREND FLIP EXIT | Entry %.4f | "
+                                    "TREND FLIP EXIT %s | Entry %.4f | "
                                     "Fill %.4f | PnL %.4f | Fee %.4f"
                                     % (
+                                        self.position_side,
                                         self.priceMin,
                                         fill_price,
                                         pnl,
@@ -1293,6 +1300,9 @@ class CryptoBot:
                         self.buy_entries = 0
                         self.buy_armed = True
                         self.previous_histogram = None
+                        self.take_profit_hit = False
+                        self.entry_time = None
+                        self.wallet_binance.save_trade_state(False, None)
                         self.wallet()
 
                     except Exception as e:
@@ -1313,11 +1323,11 @@ class CryptoBot:
                 "Histo: %.5f | RSI: %.2f | "
                 "SMA20: %.2f | SMA50: %.2f | "
                 "ATR: %.4f | StopSize: %.4f | BuyStop: %.4f | "
-                "TREND15m Price: %.4f | "
-                "TREND15m SMA20: %.4f | "
-                "TREND15m EMA200: %.4f | "
-                "TREND15m ADX: %.1f | "
-                "TREND15m Bullish: %s | TREND15m Bearish: %s | "
+                "TREND%s Price: %.4f | "
+                "TREND%s SMA20: %.4f | "
+                "TREND%s EMA200: %.4f | "
+                "TREND%s ADX: %.1f | "
+                "TREND%s Bullish: %s | TREND%s Bearish: %s | "
                 "%s: %.2f | %s: %.4f | side: %s | "
                 "trailBuy: %s | trailSell: %s | trailShort: %s | trailCover: %s | "
                 "buyEntries: %d | buyArmed: %s"
@@ -1333,11 +1343,17 @@ class CryptoBot:
                     self.atr,
                     self.stopSize,
                     self.buyStopSize,
+                    self.trend_timeframe,
                     self.trend_price,
+                    self.trend_timeframe,
                     self.trend_sma1,
+                    self.trend_timeframe,
                     self.trend_ema200,
+                    self.trend_timeframe,
                     self.trend_adx,
+                    self.trend_timeframe,
                     self.trend_bullish,
+                    self.trend_timeframe,
                     self.trend_bearish,
                     self.stableName,
                     self.stableCoin,
@@ -1407,7 +1423,7 @@ class CryptoBot:
             )
             print(
                 "  TREND %s: Price %.4f | SMA20 %.4f | "
-                "EMA200 %.4f | ADX %.1f | BULLISH=%s"
+                "EMA200 %.4f | ADX %.1f | BULLISH=%s | BEARISH=%s"
                 % (
                     self.trend_timeframe,
                     self.trend_price,
@@ -1415,6 +1431,7 @@ class CryptoBot:
                     self.trend_ema200,
                     self.trend_adx,
                     self.trend_bullish,
+                    self.trend_bearish,
                 )
             )
             print(

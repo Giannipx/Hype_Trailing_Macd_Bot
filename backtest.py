@@ -27,11 +27,31 @@ OUTPUT_DIR = "backtest_output"
 
 TF_SECONDS = {
     "1m": 60,
+    "3m": 180,
     "5m": 300,
     "15m": 900,
     "30m": 1800,
     "1h": 3600,
+    "2h": 7200,
+    "4h": 14400,
+    "1d": 86400,
 }
+
+
+def resolve_trend_tf(tf, custom_trend="auto"):
+    if custom_trend and custom_trend != "auto":
+        return custom_trend
+    tf_map = {
+        "1m": "15m",
+        "3m": "15m",
+        "5m": "15m",
+        "15m": "1h",
+        "30m": "2h",
+        "1h": "4h",
+        "2h": "4h",
+        "4h": "1d",
+    }
+    return tf_map.get(tf, "15m")
 
 
 # ==================================================================
@@ -727,7 +747,7 @@ def print_report(timeframe, period_label, result, start_cash, last_price, strate
     dd_usd, dd_pct = max_drawdown(equity_curve)
 
     print("=" * 70)
-    print("BACKTEST %s | periodo: %s" % (timeframe, period_label))
+    print("BACKTEST %s | trend: %s | periodo: %s" % (timeframe, strategy_params.get("trend_timeframe", "15m"), period_label))
     print("=" * 70)
     print("Candele valutate:      %d" % len(equity_curve))
     print(
@@ -762,7 +782,7 @@ def print_report(timeframe, period_label, result, start_cash, last_price, strate
     print("")
 
     return {
-        "timeframe": timeframe, "period": period_label,
+        "timeframe": timeframe, "trend_tf": strategy_params.get("trend_timeframe", "15m"), "period": period_label,
         "n_trades": len(trades), "n_buy": n_buy, "n_short": n_short, "n_sell": n_sell, "n_cover": n_cover, "n_hard_stop": n_hard_stop,
         "win_rate_pct": round(win_rate, 2),
         "realized_pnl_uscite_usd": round(wallet.realized_pnl_usd, 2),
@@ -838,6 +858,7 @@ def main():
     parser.add_argument("--adx-threshold", type=float, default=None)
     parser.add_argument("--trail-buy-timeout", type=float, default=None)
     parser.add_argument("--enable-short", choices=("y", "n"), default=None)
+    parser.add_argument("--trend-timeframe", default=None, help="Timeframe per trend filter (default: auto)")
     parser.add_argument("--start-cash", type=float, default=None)
     args = parser.parse_args()
 
@@ -862,6 +883,7 @@ def main():
     args.enable_short = (param_value(args.enable_short, params, "ENABLE_SHORT", "n", str).lower() == "y")
     args.stoploss = param_value(args.stoploss, params, "STOPLOSS", "n", str).lower()
     args.interval = param_value(None, params, "INTERVAL", 4, float)
+    args.trend_timeframe = param_value(args.trend_timeframe, params, "TREND_TIMEFRAME", "auto", str).strip()
     args.start_cash = config.START_BALANCE_USD if args.start_cash is None else args.start_cash
 
     strategy_params = {
@@ -878,6 +900,7 @@ def main():
         "stoploss": args.stoploss,
         "interval": args.interval,
         "enable_short": args.enable_short,
+        "trend_timeframe": args.trend_timeframe,
     }
 
     if (args.start_date is None) != (args.end_date is None):
@@ -903,17 +926,25 @@ def main():
 
     hl_util = Hyperliquid(real="n", market=args.symbol)
 
-    print("Scarico storico 15m (trend filter, condiviso da tutti i timeframe)...")
-    trend_candles = hl_util.ohlcv_history(args.symbol, TREND_TIMEFRAME, start_ms, end_ms)
-    print("  %d candele 15m" % len(trend_candles))
-
     summary_rows = []
+    trend_candles_cache = {}
+
     for tf in timeframes:
+        target_trend_tf = resolve_trend_tf(tf, args.trend_timeframe)
+        if target_trend_tf not in trend_candles_cache:
+            trend_sec = TF_SECONDS.get(target_trend_tf, 900)
+            warmup_ms = 250 * trend_sec * 1000
+            trend_start_ms = max(0, start_ms - warmup_ms)
+            print("Scarico storico %s (trend filter per %s)..." % (target_trend_tf, tf))
+            trend_candles_cache[target_trend_tf] = hl_util.ohlcv_history(
+                args.symbol, target_trend_tf, trend_start_ms, end_ms
+            )
+            print("  %d candele %s" % (len(trend_candles_cache[target_trend_tf]), target_trend_tf))
+
+        trend_candles = trend_candles_cache[target_trend_tf]
+
         print("\nScarico storico %s..." % tf)
-        if tf == TREND_TIMEFRAME:
-            candles = trend_candles
-        else:
-            candles = hl_util.ohlcv_history(args.symbol, tf, start_ms, end_ms)
+        candles = hl_util.ohlcv_history(args.symbol, tf, start_ms, end_ms)
         print("  %d candele %s" % (len(candles), tf))
         if len(candles) < LIMIT + 10:
             print("  Dati insufficienti per %s, salto." % tf)
@@ -928,8 +959,10 @@ def main():
             start_cash=args.start_cash, enable_short=args.enable_short,
         )
         last_price = candles[-1][4]
+        tf_params = dict(strategy_params)
+        tf_params["trend_timeframe"] = target_trend_tf
         summary = print_report(
-            tf, period_label, result, args.start_cash, last_price, strategy_params,
+            tf, period_label, result, args.start_cash, last_price, tf_params,
         )
         summary_rows.append(summary)
 

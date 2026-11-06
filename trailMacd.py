@@ -106,6 +106,9 @@ class StopTrail:
                 self.wallet_binance.cronoMacdString("BUY | Fill: %.3f | Stop loss: %.3f | fee: %.4f | USDC: %.2f | %s: %.4f"
                                                     % (fill_price, self.stoploss, fee_t, self.stableCoin, self.cryptoName, self.cryptoCoin))
                 self.wallet_binance.write_ciclostart(self.priceMin)
+                if self.stoplossorder == "y":
+                    triggerPrice = round(fill_price - (self.stopsize * self.multiSize), 4)
+                    self.wallet_binance.crea_ordine_sell_stop(self.market, amount, triggerPrice, triggerPrice)
                 now = datetime.now(timezone.utc)
                 self.wallet_binance.cronoTradeMacd(now, "BUY", self.market, amount, fill_price)
                 print("Torno a MACD")
@@ -135,6 +138,9 @@ class StopTrail:
                 self.wallet_binance.cronoMacdString("SHORT | Fill: %.3f | Stop: %.3f | fee: %.4f | USDC: %.2f | %s: %.4f"
                                                     % (fill_price, self.stoploss, fee_t, self.stableCoin, self.cryptoName, self.cryptoCoin))
                 self.wallet_binance.write_ciclostart(self.priceMin)
+                if self.stoplossorder == "y":
+                    triggerPrice = round(fill_price + (self.stopsize * self.multiSize), 4)
+                    self.wallet_binance.crea_ordine_buy_stop(self.market, amount, triggerPrice, triggerPrice)
                 now = datetime.now(timezone.utc)
                 self.wallet_binance.cronoTradeMacd(now, "SHORT", self.market, amount, fill_price)
                 print("Torno a MACD")
@@ -145,6 +151,9 @@ class StopTrail:
                 self.stoploss = self.price + self.stopsize
                 print("New low in cover trail: Updating stop to %.4f" % self.stoploss)
             elif self.price >= self.stoploss:
+                if self.stoplossorder == "y":
+                    self.wallet_binance.elimina_ordine(self.market)
+
                 coinCover = self.coinBot
                 if coinCover <= 0:
                     self.running = False
