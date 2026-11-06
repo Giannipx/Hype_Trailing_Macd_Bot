@@ -447,3 +447,52 @@ Test eseguito sui dati storici reali a 30 giorni:
   - *Bi-direzionale (Long + Short)*: 23 trade, Win Rate **64.3%**, Rendimento **+1.29%** (più che raddoppiato!), Max Drawdown 2.32%.
 - **Timeframe bassi (5m e 15m)**:
   - Sul 5m il rumore di mercato e le oscillazioni laterali (chop) provocano frequenti falsi segnali ed erosione del capitale dovuta alle fee taker (oltre $37 di fee accumulate su 5m). Viene pertanto raccomandato l'uso del timeframe **1h** per massimizzare il rendimento e abbattere le commissioni.
+
+---
+
+## 9. Quinto giro: Risoluzione dei 6 Bug Logici e Ottimizzazione Architetturale (Post-Review Esterna)
+
+In seguito all'analisi dettagliata condotta sulla codebase aggregata (`HYPE_BOT_BUNDLE.txt`), sono stati confermati e risolti 6 bug logici e diverse aree di ottimizzazione architetturale:
+
+### 9.1 — `shortStopSize` reso dinamico con ATR
+- **File:** `botMacd.py` (`run()`)
+- **Problema:** Nel loop principale venivano aggiornati `self.stopSize` e `self.buyStopSize`, ma `self.shortStopSize` non veniva mai aggiornato ad ogni candela, rimanendo per sempre inchiodato al valore floor iniziale ($0.108), ignorando la volatilità.
+- **Fix:** Aggiunto `self.shortStopSize = self.buyStopSize = round(max(self.stop_floor * 0.6, self.atr * 1.0), 4)`.
+
+### 9.2 — Formula Equity Universale e Margin Sizing
+- **File:** `botMacd.py` (`get_equity()`, `wallet()`), `backtest.py` (`can_open_buy()`), `hl.py` (`get_withdrawable()`)
+- **Problema:** 
+  1. In Reale (`REAL=y`), `get_balance("USDC")` ritorna già `accountValue` da Hyperliquid (che comprende l'unrealized PnL). Fare `equity = stableCoin + cryptoCoin * price` creava un doppio conteggio della posizione.
+  2. In Paper con SHORT, il cash non scala il nozionale. Sommare `cryptoCoin * price` gonfiava l'equity del 40-50%.
+  3. In `backtest.py`, `can_open_buy()` faceva `wallet.cash_usd + position_value` invece di chiamare `wallet.equity(price)`.
+- **Fix:** Introdotto `get_equity()` dedicato in `botMacd.py` (reale: `accountValue` puro; paper long: `cash + crypto*px`; paper short: `cash + unrealized_pnl`). Aggiunto `get_withdrawable()` in `hl.py` per non impegnare margine bloccato.
+
+### 9.3 — Dimensionamento Position Sizing vincolato a `PERC_STABLE`
+- **File:** `botMacd.py` (`wallet()`), `backtest.py` (`run_backtest()`)
+- **Problema:** Quando `atr * hard_stop_atr_mult < price * max_loss_pct`, matematicamente `target_usd` collassava su `equity`, forzando sempre l'ingresso al cap massimo (50%) e ignorando `PERC_STABLE=0.15`.
+- **Fix:** `target_usd` viene vincolato a `min(target_by_risk, equity * percStable)`, rispettando fedelmente il parametro di allocazione per trade. Nel backtest a 30d, questo ha ridotto il Max Drawdown da **2.32% a soli 0.70%** a parità di Win Rate (64.3%).
+
+### 9.4 — Protezione del Runner dopo Take Profit Parziale (1.5x ATR)
+- **File:** `botMacd.py`, `backtest.py`
+- **Problema:** Quando scattava il Take Profit Parziale al 50% con stop spostato a Break-Even, un'inversione dell'istogramma MACD al ciclo successivo svendeva subito il restante 50% "runner" tramite trailing MACD a prezzi peggiori del target TP1.
+- **Fix:** Quando `take_profit_hit = True`, l'uscita anticipata su MACD viene sospesa se il prezzo è inferiore a TP1 (per il Long) o superiore a TP1 (per lo Short), lasciando correre il runner con la protezione garantita dello stop a Break-Even.
+
+### 9.5 — Ottimizzazione Chiamate REST e Caching `user_state`
+- **File:** `trailMacd.py`, `hl.py`
+- **Problema:** `StopTrail` chiamava `self.wallet()` 2-3 volte per ogni ciclo da 4 secondi (in `print_status`, `update_stop` e trigger), generando fino a 10-15 chiamate HTTP ogni 4 secondi su Hyperliquid.
+- **Fix:** 
+  1. `self.wallet()` viene chiamato una sola volta per iterazione all'inizio del `while self.running:`.
+  2. In `hl.py` è stata aggiunta una cache breve (1.5s) per `user_state`, invalidata istantaneamente solo su esecuzione ordini. I payload multipli (equity, szi, entryPx, side) condividono la stessa richiesta REST.
+
+### 9.6 — Persistenza dello Stato su Riavvio/Crash
+- **File:** `hl.py` (`save_trade_state`, `load_trade_state`), `botMacd.py`
+- **Problema:** Se il bot si riavviava con posizione aperta dopo aver preso il TP1, dimenticava `take_profit_hit` ed `entry_time`, provando a eseguire un secondo TP1 sul 50% residuo e azzerando il timer dell'uscita tecnica.
+- **Fix:** `take_profit_hit` ed `entry_time` vengono salvati in `paper_wallet.json` (o `bot_state.json` in reale) e ripristinati automaticamente all'avvio.
+
+### 9.7 — Timeframe 1h & Trend Filter Dinamico
+- **File:** `hype.txt`, `jbmainMacd.py`, `botMacd.py`
+- **Fix:** Configurato `TIMEFRAME=1h` e `TREND_TIMEFRAME=4h` in `hype.txt`. Risolto il disallineamento della gerarchia multi-timeframe tramite risoluzione automatica in `jbmainMacd.py` e `botMacd.py`.
+
+### 9.8 — Supporto SHORT in `dashboard.py`
+- **File:** `dashboard.py`
+- **Fix:** Calcolo dell'equity corretto per le posizioni SHORT (`cash + unrealized_pnl`), badge visivo del side (`LONG`, `SHORT`, `FLAT`) e monitoraggio degli stati `trail_short` e `trail_cover`.

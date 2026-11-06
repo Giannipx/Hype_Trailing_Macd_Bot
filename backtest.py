@@ -188,12 +188,12 @@ def trend_status_at(trend_candles, trend_close_times, as_of_ms, adx_threshold=20
 # RISK MANAGEMENT
 # ==================================================================
 def can_open_buy(wallet, price, buy_entries, buy_armed, stableBot_usd):
-    if buy_entries >= CryptoBot.MAX_BUY_ENTRIES:
+    if buy_entries >= 1:
         return False
     if not buy_armed:
         return False
-    position_value = wallet.sz * price
-    equity = wallet.cash_usd + position_value
+    position_value = (wallet.sz * price) if wallet.sz > 0 else 0.0
+    equity = wallet.equity(price)
     max_position = equity * CryptoBot.MAX_POSITION_PCT
     next_buy_value = stableBot_usd
     if position_value + next_buy_value > max_position + 0.50:
@@ -503,31 +503,36 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
                 rsi_v = ind["rsi"]
 
                 # Uscita LONG
+                tp_level = price_min + (atr_value * 1.5)
                 if wallet.side == "LONG" and rsi_v > 40 and wallet.sz * price > 10:
-                    exit_idx, filled, info = simulate_trail(
-                        candles, i, "sell", stop_size, perc_stable, perc_coin,
-                        wallet, hl_util, symbol, sell_stops, equity_curve,
-                    )
-                    if filled:
-                        trades.append({
-                            "idx": exit_idx, "time": candles[exit_idx][0], "type": info["type"],
-                            "price": info["fill_price"], "sz": info["sz"],
-                            "fee": info["fee"], "pnl": info["pnl"],
-                        })
-                        if wallet.sz <= 0:
-                            buy_entries = 0
-                            buy_armed = True
-                            previous_histogram = None
-                        else:
-                            previous_histogram = ind["histogram"]
-                        i = exit_idx + 1
-                        continue
+                    if take_profit_hit and price < tp_level:
+                        pass
                     else:
-                        if info.get("reason") == "EOF":
-                            pending_trail = {"type": "sell", "start_idx": i}
-                        previous_histogram = ind["histogram"]
-                        i = exit_idx + 1
-                        continue
+                        exit_idx, filled, info = simulate_trail(
+                            candles, i, "sell", stop_size, perc_stable, perc_coin,
+                            wallet, hl_util, symbol, sell_stops, equity_curve,
+                        )
+                        if filled:
+                            trades.append({
+                                "idx": exit_idx, "time": candles[exit_idx][0], "type": info["type"],
+                                "price": info["fill_price"], "sz": info["sz"],
+                                "fee": info["fee"], "pnl": info["pnl"],
+                            })
+                            if wallet.sz <= 0:
+                                buy_entries = 0
+                                buy_armed = True
+                                previous_histogram = None
+                                take_profit_hit = False
+                            else:
+                                previous_histogram = ind["histogram"]
+                            i = exit_idx + 1
+                            continue
+                        else:
+                            if info.get("reason") == "EOF":
+                                pending_trail = {"type": "sell", "start_idx": i}
+                            previous_histogram = ind["histogram"]
+                            i = exit_idx + 1
+                            continue
 
                 # Ingresso SHORT (inversione ribassista da pullback rialzista)
                 elif wallet.side == "FLAT" and enable_short and rsi_v > 45 and trend_bearish and wallet.cash_usd > 10:
@@ -538,7 +543,8 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
                     stop_dist = max(floor_dist, atr_dist)
                     if stop_dist > 0:
                         coins = risk_amount_usd / stop_dist
-                        target_usd = coins * price
+                        stable_cap = equity * perc_stable
+                        target_usd = min(coins * price, stable_cap)
                         max_allowed = wallet.cash_usd * 0.95
                         max_position_limit = equity * CryptoBot.MAX_POSITION_PCT
                         current_position_value = wallet.sz * price
@@ -577,31 +583,36 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
                 rsi_v = ind["rsi"]
 
                 # Uscita SHORT
+                tp_level = price_min - (atr_value * 1.5)
                 if wallet.side == "SHORT" and rsi_v < 55 and wallet.sz * price > 10:
-                    exit_idx, filled, info = simulate_trail(
-                        candles, i, "cover", stop_size, perc_stable, perc_coin,
-                        wallet, hl_util, symbol, sell_stops, equity_curve,
-                    )
-                    if filled:
-                        trades.append({
-                            "idx": exit_idx, "time": candles[exit_idx][0], "type": info["type"],
-                            "price": info["fill_price"], "sz": info["sz"],
-                            "fee": info["fee"], "pnl": info["pnl"],
-                        })
-                        if wallet.sz <= 0:
-                            buy_entries = 0
-                            buy_armed = True
-                            previous_histogram = None
-                        else:
-                            previous_histogram = ind["histogram"]
-                        i = exit_idx + 1
-                        continue
+                    if take_profit_hit and price > tp_level:
+                        pass
                     else:
-                        if info.get("reason") == "EOF":
-                            pending_trail = {"type": "cover", "start_idx": i}
-                        previous_histogram = ind["histogram"]
-                        i = exit_idx + 1
-                        continue
+                        exit_idx, filled, info = simulate_trail(
+                            candles, i, "cover", stop_size, perc_stable, perc_coin,
+                            wallet, hl_util, symbol, sell_stops, equity_curve,
+                        )
+                        if filled:
+                            trades.append({
+                                "idx": exit_idx, "time": candles[exit_idx][0], "type": info["type"],
+                                "price": info["fill_price"], "sz": info["sz"],
+                                "fee": info["fee"], "pnl": info["pnl"],
+                            })
+                            if wallet.sz <= 0:
+                                buy_entries = 0
+                                buy_armed = True
+                                previous_histogram = None
+                                take_profit_hit = False
+                            else:
+                                previous_histogram = ind["histogram"]
+                            i = exit_idx + 1
+                            continue
+                        else:
+                            if info.get("reason") == "EOF":
+                                pending_trail = {"type": "cover", "start_idx": i}
+                            previous_histogram = ind["histogram"]
+                            i = exit_idx + 1
+                            continue
 
                 # Ingresso LONG (solo se FLAT)
                 elif wallet.side == "FLAT":
@@ -614,7 +625,8 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
                         stop_dist = max(floor_dist, atr_dist)
                         if stop_dist > 0:
                             coins = risk_amount_usd / stop_dist
-                            target_usd = coins * price
+                            stable_cap = equity * perc_stable
+                            target_usd = min(coins * price, stable_cap)
                             max_allowed = wallet.cash_usd * 0.95
                             max_position_limit = equity * CryptoBot.MAX_POSITION_PCT
                             current_position_value = wallet.sz * price

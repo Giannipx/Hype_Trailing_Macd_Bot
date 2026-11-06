@@ -48,12 +48,29 @@ class Hyperliquid:
         self.exchange = None
         self.account_address = config.HL_ACCOUNT_ADDRESS
         self._leverage_set = False
+        self._cached_user_state = None
+        self._cached_user_state_time = 0.0
 
         if real == "y":
             if not config.HL_SECRET_KEY:
                 raise ValueError("REAL=y richiede HL_SECRET_KEY in config.py")
             wallet = eth_account.Account.from_key(config.HL_SECRET_KEY)
             self.exchange = Exchange(wallet, base_url, account_address=config.HL_ACCOUNT_ADDRESS)
+
+    def _get_user_state(self, max_age_seconds=1.5):
+        """Cache breve (1.5s) dello user_state per evitare chiamate REST ridondanti
+        nello stesso ciclo."""
+        now = time.time()
+        if (
+            self._cached_user_state is not None
+            and (now - self._cached_user_state_time) < max_age_seconds
+        ):
+            return self._cached_user_state
+        address = self.account_address or self.exchange.wallet.address
+        state = self.info.user_state(address)
+        self._cached_user_state = state
+        self._cached_user_state_time = now
+        return state
 
     # ---- utilità ----
     def _coin(self, market):
@@ -214,9 +231,8 @@ class Hyperliquid:
         altrimenti -> size posizione perpetual (szi). PAPER: legge il wallet JSON."""
         if not self.exchange:
             return self.read_balance(0 if coin in ("USDT", "USDC") else 1)
-        address = self.account_address or self.exchange.wallet.address
         try:
-            state = self.info.user_state(address)
+            state = self._get_user_state()
         except Exception:
             return 0.0
         if coin in ("USDT", "USDC"):
@@ -227,20 +243,34 @@ class Hyperliquid:
                 return abs(float(pos.get("szi", 0.0)))
         return 0.0
 
+    def get_withdrawable(self):
+        """Ritorna il margine USDC libero/disponibile per nuovi ordini."""
+        if not self.exchange:
+            d = self._load_paper()
+            cash = float(d.get("cash_usd", 0.0))
+            if d.get("side") == "SHORT" and float(d.get("sz", 0.0)) > 1e-5:
+                entry_notional = float(d.get("entry_px", 0.0)) * float(d.get("sz", 0.0))
+                return max(0.0, cash - entry_notional)
+            return cash
+        try:
+            state = self._get_user_state()
+            return float(state.get("withdrawable", 0.0))
+        except Exception:
+            return 0.0
+
     def get_position_side(self, market=None):
         """Ritorna 'LONG', 'SHORT' o 'FLAT'."""
         coin = self._coin(market or self.market)
         if self.exchange:
-            address = self.account_address or self.exchange.wallet.address
             try:
-                state = self.info.user_state(address)
+                state = self._get_user_state()
                 for ap in state.get("assetPositions", []):
                     pos = ap.get("position", {})
                     if pos.get("coin") == coin:
                         szi = float(pos.get("szi", 0.0))
-                        if szi > 0:
+                        if szi > 1e-5:
                             return "LONG"
-                        elif szi < 0:
+                        elif szi < -1e-5:
                             return "SHORT"
                         return "FLAT"
             except Exception:
@@ -256,43 +286,15 @@ class Hyperliquid:
         return 0.0
 
     def get_entry_price(self, market):
-        """Prezzo medio di ingresso della posizione corrente.
-
-        FIX (giro 1): prima il gate "vendo solo sopra il prezzo d'acquisto"
-        leggeva fileCicloStart.txt, valorizzato con `priceMin = self.price`
-        (il prezzo dell'ULTIMA singola buy), mentre il wallet paper calcola
-        correttamente una media ponderata (entry_px) quando si aggiunge a
-        una posizione esistente. get_entry_price() è la fonte unica di
-        verità: PAPER legge entry_px dal wallet simulato, REALE legge
-        entryPx della posizione da Hyperliquid.
-
-        FIX (giro 2): il saldo iniziale di walletIniziale.txt (crypto
-        "gratuita", non comprata da nessuno) viene marcato a mercato da
-        _init_paper() solo per evitare un PnL fantasma nel calcolo — quel
-        prezzo NON è un vero prezzo d'acquisto e non deve condizionare se il
-        bot può comprare/vendere. Se non è ancora avvenuto nessun BUY reale
-        del bot ("entry_is_real": False), il gate ritorna 0.0: qualunque
-        prezzo di mercato è considerato "sopra" il costo (che di fatto è
-        zero, essendo un saldo di partenza gratuito), quindi non blocca né
-        SELL né la logica di hard-stop finché il bot non ha comprato
-        davvero qualcosa.
-        """
+        """Prezzo medio di ingresso della posizione corrente."""
         coin = self._coin(market)
         if not self.exchange:
             d = self._load_paper()
-            # Compatibilità: un paper_wallet.json creato prima di questo fix
-            # non ha il campo "entry_is_real". In quel caso il default è
-            # True (si presume un entry_px reale da trade già avvenuti),
-            # altrimenti un wallet già in uso perderebbe silenziosamente la
-            # protezione hard-stop/gate finché non scatta un nuovo buy. Solo
-            # un wallet resettato da _init_paper() dopo questo fix parte
-            # esplicitamente da False.
             if not d.get("entry_is_real", True):
                 return 0.0
             return float(d.get("entry_px", 0.0))
-        address = self.account_address or self.exchange.wallet.address
         try:
-            state = self.info.user_state(address)
+            state = self._get_user_state()
             for ap in state.get("assetPositions", []):
                 pos = ap.get("position", {})
                 if pos.get("coin") == coin:
@@ -300,6 +302,36 @@ class Hyperliquid:
         except Exception:
             pass
         return 0.0
+
+    # ---- persistenza stato trade (resilienza al riavvio) ----
+    def save_trade_state(self, take_profit_hit, entry_time):
+        """Salva take_profit_hit ed entry_time per mantenerli dopo riavvio/crash."""
+        if not self.exchange:
+            d = self._load_paper()
+            d["take_profit_hit"] = bool(take_profit_hit)
+            d["entry_time"] = entry_time
+            self._save_paper(d)
+        else:
+            state_file = "bot_state.json"
+            tmp = state_file + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"take_profit_hit": bool(take_profit_hit), "entry_time": entry_time}, f)
+            os.replace(tmp, state_file)
+
+    def load_trade_state(self):
+        """Carica lo stato del trade al riavvio."""
+        if not self.exchange:
+            d = self._load_paper()
+            return bool(d.get("take_profit_hit", False)), d.get("entry_time", None)
+        state_file = "bot_state.json"
+        if os.path.exists(state_file):
+            try:
+                with open(state_file) as f:
+                    s = json.load(f)
+                    return bool(s.get("take_profit_hit", False)), s.get("entry_time", None)
+            except Exception:
+                pass
+        return False, None
 
     # ---- wallet paper (perp: cash USDC + posizione szi) ----
     def _paper_default(self):
@@ -312,6 +344,8 @@ class Hyperliquid:
             "realized_pnl_usd": 0.0,
             "fees_usd": 0.0,
             "n_trades": 0,
+            "take_profit_hit": False,
+            "entry_time": None,
         }
 
     def _init_paper(self):
@@ -479,6 +513,7 @@ class Hyperliquid:
             if self.exchange:
                 self._ensure_leverage(coin)
                 result = self.exchange.market_open(name=coin, is_buy=True, sz=sz, slippage=0.005)
+                self._cached_user_state = None
                 norm = self._normalize_order_result(result, self.price if hasattr(self, "price") else price)
                 esito = "FILLED" if norm["filled"] else f"NON ESEGUITO ({norm.get('error')})"
                 self.cronoMacdString("BUY reale", coin, sz, norm.get("status", "?"), esito)
@@ -518,6 +553,7 @@ class Hyperliquid:
         try:
             if self.exchange:
                 result = self.exchange.market_close(coin=coin, sz=sz, slippage=0.005)
+                self._cached_user_state = None
                 norm = self._normalize_order_result(result, self.price if hasattr(self, "price") else price)
                 esito = "FILLED" if norm["filled"] else f"NON ESEGUITO ({norm.get('error')})"
                 self.cronoMacdString("SELL reale", coin, sz, norm.get("status", "?"), esito)
@@ -534,6 +570,8 @@ class Hyperliquid:
                 d["entry_px"] = 0.0
                 d["entry_is_real"] = False
                 d["side"] = "FLAT"
+                d["take_profit_hit"] = False
+                d["entry_time"] = None
             d["realized_pnl_usd"] = float(d["realized_pnl_usd"]) + realized
             d["fees_usd"] = float(d["fees_usd"]) + fee
             d["n_trades"] = int(d["n_trades"]) + 1
@@ -556,6 +594,7 @@ class Hyperliquid:
             if self.exchange:
                 self._ensure_leverage(coin)
                 result = self.exchange.market_open(name=coin, is_buy=False, sz=sz, slippage=0.005)
+                self._cached_user_state = None
                 norm = self._normalize_order_result(result, self.price if hasattr(self, "price") else price)
                 esito = "FILLED" if norm["filled"] else f"NON ESEGUITO ({norm.get('error')})"
                 self.cronoMacdString("SHORT reale", coin, sz, norm.get("status", "?"), esito)
@@ -589,6 +628,7 @@ class Hyperliquid:
         try:
             if self.exchange:
                 result = self.exchange.market_close(coin=coin, sz=sz, slippage=0.005)
+                self._cached_user_state = None
                 norm = self._normalize_order_result(result, self.price if hasattr(self, "price") else price)
                 esito = "FILLED" if norm["filled"] else f"NON ESEGUITO ({norm.get('error')})"
                 self.cronoMacdString("COVER SHORT reale", coin, sz, norm.get("status", "?"), esito)
@@ -605,6 +645,8 @@ class Hyperliquid:
                 d["entry_px"] = 0.0
                 d["entry_is_real"] = False
                 d["side"] = "FLAT"
+                d["take_profit_hit"] = False
+                d["entry_time"] = None
             d["realized_pnl_usd"] = float(d["realized_pnl_usd"]) + realized
             d["fees_usd"] = float(d["fees_usd"]) + fee
             d["n_trades"] = int(d["n_trades"]) + 1

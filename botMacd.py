@@ -68,7 +68,11 @@ class CryptoBot:
 
         self.market = market
         self.timeframe = timeframe
-        self.trend_timeframe = trend_timeframe
+        if trend_timeframe in (None, "", "auto", "None"):
+            tf_map = {"1m": "15m", "3m": "15m", "5m": "15m", "15m": "1h", "30m": "1h", "1h": "4h", "2h": "4h", "4h": "1d"}
+            self.trend_timeframe = tf_map.get(timeframe, "4h" if timeframe == "1h" else "15m")
+        else:
+            self.trend_timeframe = trend_timeframe
         self.limit = limit
 
         self.rsi_period = rsi_period
@@ -150,9 +154,20 @@ class CryptoBot:
         # ------------------------------------------------------
         self.buy_entries = 0
         self.buy_armed = True
+        self.MAX_BUY_ENTRIES = 1
 
         self._prompt_reset_paper()
         self.wallet()
+
+        # Ripristino stato runtime salvato (resilienza a crash/riavvio)
+        saved_tp, saved_time = self.wallet_binance.load_trade_state()
+        if self.position_side != "FLAT":
+            self.take_profit_hit = saved_tp
+            self.entry_time = saved_time
+            self.buy_entries = 1
+            self.buy_armed = False
+            if self.take_profit_hit:
+                print("RIPRISTINO STATO: Take Profit Parziale già eseguito in precedenza. Stop a Break-Even attivo.")
 
     # ==========================================================
     # PAPER WALLET RESET
@@ -564,6 +579,8 @@ class CryptoBot:
             self.buy_armed = True
             self.previous_histogram = None
             self.take_profit_hit = False
+            self.entry_time = None
+            self.wallet_binance.save_trade_state(False, None)
             self.wallet()
 
             return True
@@ -620,6 +637,7 @@ class CryptoBot:
                 result = self.wallet_binance.sell(self.market, sell_amount, self.price)
                 if result.get("filled", False):
                     self.take_profit_hit = True
+                    self.wallet_binance.save_trade_state(True, self.entry_time)
                     fill_price = result.get("fill_price", self.price)
                     pnl = result.get("pnl", 0.0)
                     self.data_binance.cronoMacdString(
@@ -706,6 +724,7 @@ class CryptoBot:
             self.previous_histogram = None
             self.take_profit_hit = False
             self.entry_time = None
+            self.wallet_binance.save_trade_state(False, None)
             self.wallet()
             return True
 
@@ -770,6 +789,7 @@ class CryptoBot:
             self.previous_histogram = None
             self.take_profit_hit = False
             self.entry_time = None
+            self.wallet_binance.save_trade_state(False, None)
             self.wallet()
             return True
 
@@ -805,6 +825,7 @@ class CryptoBot:
                 result = self.wallet_binance.close_short(self.market, sell_amount, self.price)
                 if result.get("filled", False):
                     self.take_profit_hit = True
+                    self.wallet_binance.save_trade_state(True, self.entry_time)
                     fill_price = result.get("fill_price", self.price)
                     pnl = result.get("pnl", 0.0)
                     self.data_binance.cronoMacdString(
@@ -878,6 +899,7 @@ class CryptoBot:
             self.previous_histogram = None
             self.take_profit_hit = False
             self.entry_time = None
+            self.wallet_binance.save_trade_state(False, None)
             self.wallet()
             return True
 
@@ -911,13 +933,10 @@ class CryptoBot:
             )
             return False
 
+        equity = self.get_equity()
         position_value = (
             self.cryptoCoin * self.price
-        )
-        equity = (
-            self.stableCoin
-            + position_value
-        )
+        ) if self.cryptoCoin > 0 else 0.0
         max_position = (
             equity * self.MAX_POSITION_PCT
         )
@@ -1138,6 +1157,8 @@ class CryptoBot:
                     max(self.stop_floor * 0.6, self.atr * 1.0),
                     4,
                 )
+                # StopSize per SHORT: simmetrico a buyStopSize
+                self.shortStopSize = self.buyStopSize
 
                 # Trend 15m
                 self.calculate_trend_filter()
@@ -1503,7 +1524,14 @@ class CryptoBot:
                     if self.position_side == "LONG":
                         if self.last_rsi > 40:
                             print("RSI positivo [ok]")
-                            if (self.cryptoCoin * self.price) > 10 and self.trailSell:
+                            tp_level = self.priceMin + ((self.atr or 0) * 1.5)
+                            if self.take_profit_hit and self.price < tp_level:
+                                print(
+                                    "RUNNER LONG PROTETTO: Prezzo %.4f < Livello TP1 %.4f. "
+                                    "Mantengo la posizione protetta dallo stop a Break-Even (+0.20%%)."
+                                    % (self.price, tp_level)
+                                )
+                            elif (self.cryptoCoin * self.price) > 10 and self.trailSell:
                                 self.data_binance.cronoMacd(now, self.last_histogram, self.last_macd, self.last_signal, trend, self.last_rsi, "sell")
                                 task = StopTrail(
                                     self.market, "sell", self.stopSize, self.interval, self.multiSize,
@@ -1517,6 +1545,8 @@ class CryptoBot:
                                     self.buy_armed = True
                                     self.previous_histogram = None
                                     self.entry_time = None
+                                    self.take_profit_hit = False
+                                    self.wallet_binance.save_trade_state(False, None)
 
                     # Ingresso SHORT (inversione ribassista dopo pullback rialzista)
                     elif self.position_side == "FLAT" and self.enable_short:
@@ -1537,10 +1567,11 @@ class CryptoBot:
                                 task.run()
                                 self.wallet()
                                 if self.cryptoCoin > 0 and self.priceMin > 0:
-                                    self.buy_entries += 1
+                                    self.buy_entries = 1
                                     self.buy_armed = False
-                                    if getattr(self, "entry_time", None) is None:
-                                        self.entry_time = time.time()
+                                    self.entry_time = time.time()
+                                    self.take_profit_hit = False
+                                    self.wallet_binance.save_trade_state(False, self.entry_time)
                                     self.data_binance.cronoMacdString(
                                         "RISK | SHORT entry #%d | entry %.4f | size %.4f"
                                         % (self.buy_entries, self.priceMin, self.cryptoCoin)
@@ -1568,20 +1599,30 @@ class CryptoBot:
 
                     # Uscita SHORT (ricopertura in trailing)
                     if self.position_side == "SHORT":
-                        if self.last_rsi < 55 and (self.cryptoCoin * self.price) > 10 and self.trailCover:
-                            self.data_binance.cronoMacd(now, self.last_histogram, self.last_macd, self.last_signal, trend, self.last_rsi, "cover")
-                            task = StopTrail(
-                                self.market, "cover", self.stopSize, self.interval, self.multiSize,
-                                self.stableBot, self.percCoin, self.real, self.stoplossorder,
-                                self.wallet_binance, self.data_binance,
-                            )
-                            task.run()
-                            self.wallet()
-                            if self.cryptoCoin <= 0:
-                                self.buy_entries = 0
-                                self.buy_armed = True
-                                self.previous_histogram = None
-                                self.entry_time = None
+                        if self.last_rsi < 55:
+                            tp_level = self.priceMin - ((self.atr or 0) * 1.5)
+                            if self.take_profit_hit and self.price > tp_level:
+                                print(
+                                    "RUNNER SHORT PROTETTO: Prezzo %.4f > Livello TP1 %.4f. "
+                                    "Mantengo la posizione protetta da Break-Even (-0.20%%)."
+                                    % (self.price, tp_level)
+                                )
+                            elif (self.cryptoCoin * self.price) > 10 and self.trailCover:
+                                self.data_binance.cronoMacd(now, self.last_histogram, self.last_macd, self.last_signal, trend, self.last_rsi, "cover")
+                                task = StopTrail(
+                                    self.market, "cover", self.stopSize, self.interval, self.multiSize,
+                                    self.stableBot, self.percCoin, self.real, self.stoplossorder,
+                                    self.wallet_binance, self.data_binance,
+                                )
+                                task.run()
+                                self.wallet()
+                                if self.cryptoCoin <= 0:
+                                    self.buy_entries = 0
+                                    self.buy_armed = True
+                                    self.previous_histogram = None
+                                    self.entry_time = None
+                                    self.take_profit_hit = False
+                                    self.wallet_binance.save_trade_state(False, None)
 
                     # Ingresso LONG (solo se FLAT)
                     elif self.position_side == "FLAT":
@@ -1686,10 +1727,11 @@ class CryptoBot:
                                         self.cryptoCoin > 0
                                         and self.priceMin > 0
                                     ):
-                                        self.buy_entries += 1
+                                        self.buy_entries = 1
                                         self.buy_armed = False
-                                        if getattr(self, "entry_time", None) is None:
-                                            self.entry_time = time.time()
+                                        self.entry_time = time.time()
+                                        self.take_profit_hit = False
+                                        self.wallet_binance.save_trade_state(False, self.entry_time)
                                         print(
                                             "RISK | BUY entry #%d"
                                             % self.buy_entries
@@ -1740,8 +1782,27 @@ class CryptoBot:
             )
 
     # ==========================================================
-    # WALLET
+    # WALLET & EQUITY
     # ==========================================================
+    def get_equity(self):
+        """Calcola l'Equity totale reale del conto o del paper wallet.
+        - REALE: self.stableCoin (get_balance USDC) contiene già 'accountValue'
+          da Hyperliquid marginSummary, comprensivo di PnL non realizzato.
+          NON va risommato il controvalore della crypto per evitare doppio conteggio.
+        - PAPER LONG: cash_usd + (cryptoCoin * price) [il nozionale era stato scalato dal cash]
+        - PAPER SHORT: cash_usd + ((entry_px - price) * cryptoCoin) [unrealized pnl da discesa]
+        - FLAT: self.stableCoin
+        """
+        if self.real == "y":
+            return float(self.stableCoin)
+        current_price = getattr(self, "price", 0.0) or 0.0
+        if self.position_side == "SHORT":
+            unrealized = ((self.priceMin - current_price) * self.cryptoCoin) if self.priceMin > 0 else 0.0
+            return float(self.stableCoin) + unrealized
+        elif self.position_side == "LONG":
+            return float(self.stableCoin) + (self.cryptoCoin * current_price)
+        return float(self.stableCoin)
+
     def wallet(self):
         self.price = self.data_binance.get_price(
             self.market
@@ -1780,39 +1841,7 @@ class CryptoBot:
                 )
             )
 
-        # Position Sizing Dinamico basato sul rischio all'Hard Stop
-        if hasattr(self, "price") and hasattr(self, "atr") and hasattr(self, "max_loss_pct"):
-            equity = self.stableCoin + (self.cryptoCoin * self.price)
-            risk_amount_usd = equity * self.max_loss_pct
-
-            atr_dist = (self.atr or 0) * self.hard_stop_atr_mult
-            floor_dist = self.price * self.max_loss_pct
-            stop_dist = max(floor_dist, atr_dist)
-
-            if stop_dist > 0:
-                coins = risk_amount_usd / stop_dist
-                target_usd = coins * self.price
-
-                max_allowed = self.stableCoin * 0.95
-                max_position_limit = equity * getattr(self, "MAX_POSITION_PCT", 0.50)
-                current_position_value = (self.cryptoCoin * self.price) if self.cryptoCoin > 0 else 0
-                remaining_allowance = max(0, max_position_limit - current_position_value)
-
-                self.stableBot = round(min(target_usd, max_allowed, remaining_allowance), 2)
-            else:
-                self.stableBot = round(self.stableCoin * self.percStable, 2)
-        else:
-            self.stableBot = round(self.stableCoin * self.percStable, 2)
-
-        coin_symbol = self.market.split("/")[0]
-        self.coinBot = self.wallet_binance.round_size(
-            coin_symbol,
-            self.cryptoCoin * self.percCoin,
-        )
-
-        # Fonte unica del prezzo medio e side della posizione:
-        # paper -> entry_px, side
-        # reale -> entryPx, side Hyperliquid
+        # Fonte unica del prezzo medio e side della posizione (prima del calcolo equity):
         self.priceMin = (
             self.wallet_binance.get_entry_price(
                 self.market
@@ -1822,6 +1851,38 @@ class CryptoBot:
             self.wallet_binance.get_position_side(
                 self.market
             )
+        )
+
+        # Position Sizing Dinamico basato sul rischio all'Hard Stop
+        equity = self.get_equity()
+        if hasattr(self, "price") and hasattr(self, "atr") and hasattr(self, "max_loss_pct"):
+            risk_amount_usd = equity * self.max_loss_pct
+
+            atr_dist = (self.atr or 0) * self.hard_stop_atr_mult
+            floor_dist = self.price * self.max_loss_pct
+            stop_dist = max(floor_dist, atr_dist)
+
+            max_allowed = self.wallet_binance.get_withdrawable() * 0.95
+            max_position_limit = equity * getattr(self, "MAX_POSITION_PCT", 0.50)
+            current_position_value = (self.cryptoCoin * self.price) if self.cryptoCoin > 0 else 0
+            remaining_allowance = max(0.0, max_position_limit - current_position_value)
+
+            if stop_dist > 0:
+                coins = risk_amount_usd / stop_dist
+                target_by_risk = coins * self.price
+                # Non superare mai equity * percStable come base per singolo trade
+                stable_cap = equity * self.percStable
+                target_usd = min(target_by_risk, stable_cap)
+                self.stableBot = round(min(target_usd, max_allowed, remaining_allowance), 2)
+            else:
+                self.stableBot = round(min(equity * self.percStable, max_allowed, remaining_allowance), 2)
+        else:
+            self.stableBot = round(self.stableCoin * self.percStable, 2)
+
+        coin_symbol = self.market.split("/")[0]
+        self.coinBot = self.wallet_binance.round_size(
+            coin_symbol,
+            self.cryptoCoin * self.percCoin,
         )
 
         # Gestione stati trailing LONG / SHORT / FLAT

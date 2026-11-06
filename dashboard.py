@@ -134,6 +134,9 @@ bal = read_paper_wallet()
 init = read_token_file("walletIniziale.txt")
 cash_usd = float(bal.get("cash_usd", 0.0))
 sz_pos = float(bal.get("sz", 0.0))
+side = bal.get("side", "FLAT") if real != "y" else hl.get_position_side(symbol)
+if sz_pos <= 1e-5:
+    side = "FLAT"
 price_min = read_ciclostart()
 
 # ---------- dati live (prezzi + candele) ----------
@@ -167,15 +170,23 @@ for tok, amt in [("USDC", cash_usd), (symbol, sz_pos)]:
         "Valore USD": fmt_usd(usd),
     })
 
-equity = cash_usd + sz_pos * (price or 0.0)
+if side == "SHORT":
+    unrealized = (price_min - (price or 0.0)) * sz_pos if price_min > 0 else 0.0
+    equity = cash_usd + unrealized
+elif side == "LONG":
+    equity = cash_usd + sz_pos * (price or 0.0)
+else:
+    equity = cash_usd
 
 # ---------- stato trail inferito (come nel bot) ----------
 stable_coin = cash_usd
 crypto_coin = sz_pos
 stable_bot = round(stable_coin * float(params.get("PERC_STABLE", 0.1)), 2)
 coin_bot = round(crypto_coin * float(params.get("PERC_COIN", 1.0)), 4)
-trail_sell = price is not None and price > price_min and crypto_coin > 0
-trail_buy = stable_bot > 10
+trail_sell = (side == "LONG" and price is not None and crypto_coin > 0)
+trail_cover = (side == "SHORT" and price is not None and crypto_coin > 0)
+trail_buy = (side == "FLAT" and stable_bot > 10)
+trail_short = (side == "FLAT" and stable_bot > 10 and params.get("ENABLE_SHORT", "n").lower() == "y")
 
 # ============================================================
 # SIDEBAR - parametri e auto-refresh
@@ -223,7 +234,7 @@ c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
 c1.metric("Prezzo HYPE", fmt_price(price))
 c2.metric("Capitale Paper (USD)", fmt_usd(equity))
 c3.metric("USDC", fmt_usd(stable_coin))
-c4.metric("HYPE", "%g" % crypto_coin)
+c4.metric("Posizione (%s)" % side, "%g %s" % (crypto_coin, symbol))
 c5.metric("PnL realizzato", fmt_usd(bal.get("realized_pnl_usd")))
 c6.metric("Fee totali", fmt_usd(bal.get("fees_usd")))
 c7.metric("Trade", bal.get("n_trades", 0))
@@ -257,9 +268,12 @@ with tab_wallet:
     with col_c:
         st.subheader("Stato trail (inferito)")
         trail_rows = [
-            {"Stato": "Prezzo minimo (fileCicloStart)", "Valore": fmt_price(price_min)},
-            {"Stato": "trailBuy (stableBot > 10)", "Valore": trail_buy},
-            {"Stato": "trailSell (prezzo > min e HYPE > 0)", "Valore": trail_sell},
+            {"Stato": "Side posizione", "Valore": side},
+            {"Stato": "Prezzo medio entry", "Valore": fmt_price(bal.get("entry_px"))},
+            {"Stato": "trailBuy (Long)", "Valore": trail_buy},
+            {"Stato": "trailShort (Short)", "Valore": trail_short},
+            {"Stato": "trailSell (Exit Long)", "Valore": trail_sell},
+            {"Stato": "trailCover (Exit Short)", "Valore": trail_cover},
             {"Stato": "Stable Bot", "Valore": fmt_usd(stable_bot)},
             {"Stato": "Coin Bot", "Valore": "%g" % coin_bot},
         ]

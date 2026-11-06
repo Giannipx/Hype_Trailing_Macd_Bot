@@ -40,8 +40,6 @@ class StopTrail:
 
     # UPDATE STOP******************************************************
     def update_stop(self):
-        self.wallet()
-
         # sell (chiusura long) -------------------------------
         if self.type == "sell":
             # Se il prezzo sale allora sale anche il trail
@@ -56,7 +54,6 @@ class StopTrail:
                     if self.stoplossorder == "y":
                         self.wallet_binance.elimina_ordine(self.market)
 
-                    self.wallet()
                     coinSell = self.coinBot
                     if coinSell <= 0:
                         self.running = False
@@ -90,7 +87,6 @@ class StopTrail:
                 self.stoploss = self.price + self.stopsize
                 print("New low observed: Updating stop loss to %.4f" % self.stoploss)
             elif self.price >= self.stoploss:
-                self.wallet()
                 stableBuy = self.stableBot
                 amount = self.wallet_binance.usd_to_size(self.market, stableBuy, self.price)
                 print("++++++++++++++++++++++++++++++++++++++++++")
@@ -120,7 +116,6 @@ class StopTrail:
                 self.stoploss = self.price - self.stopsize
                 print("New high in short trail: Updating stop to %.4f" % self.stoploss)
             elif self.price <= self.stoploss:
-                self.wallet()
                 stableShort = self.stableBot
                 amount = self.wallet_binance.usd_to_size(self.market, stableShort, self.price)
                 print("++++++++++++++++++++++++++++++++++++++++++")
@@ -150,7 +145,6 @@ class StopTrail:
                 self.stoploss = self.price + self.stopsize
                 print("New low in cover trail: Updating stop to %.4f" % self.stoploss)
             elif self.price >= self.stoploss:
-                self.wallet()
                 coinCover = self.coinBot
                 if coinCover <= 0:
                     self.running = False
@@ -180,8 +174,6 @@ class StopTrail:
 
     # PRINT************************************************************************
     def print_status(self):
-        self.wallet()
-
         print("---------------------")
         print("Time: %s" % self.data_binance.timeCET())
         print("Trail type: %s" % self.type)
@@ -203,6 +195,7 @@ class StopTrail:
         self.start_time = time.time()
         while self.running:
             try:
+                self.wallet()  # Chiamata unica al ciclo per evitare rate limit
                 if self.type in ("buy", "short"):
                     elapsed = time.time() - self.start_time
                     if self.max_duration > 0 and elapsed > self.max_duration:
