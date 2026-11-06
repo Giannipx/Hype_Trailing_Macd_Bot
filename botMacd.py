@@ -52,6 +52,7 @@ class CryptoBot:
         trail_buy_timeout=1200,
         trend_flip_exit="n",
         time_stop_minutes=60.0,
+        enable_short="n",
     ):
         # Wallet / ordini
         self.wallet_binance = Hyperliquid(
@@ -83,6 +84,9 @@ class CryptoBot:
         self.atr = None
         self.stopSize = stopSize  # valore iniziale per SELL
         self.buyStopSize = round(stopSize * 0.6, 4)  # valore iniziale più reattivo per BUY
+        self.shortStopSize = round(stopSize * 0.6, 4)  # valore iniziale più reattivo per SHORT
+        self.enable_short = (str(enable_short).strip().lower() == "y")
+        self.position_side = "FLAT"
         self.max_loss_pct = (
             self.MAX_LOSS_PCT
             if max_loss_pct is None
@@ -134,6 +138,8 @@ class CryptoBot:
         self.entry_time = None
         self.trailBuy = False
         self.trailSell = False
+        self.trailShort = False
+        self.trailCover = False
         self.take_profit_hit = False
 
         # Wallet
@@ -272,6 +278,7 @@ class CryptoBot:
             "Hard stop:         -%.2f%% (dinamico ATR x%.1f)"
             % (self.max_loss_pct * 100, self.hard_stop_atr_mult)
         )
+        print("Modulo SHORT:      %s" % ("attivo (bi-direzionale)" if self.enable_short else "non attivo (solo long)"))
         print(
             "Leva:              %gx (%s)"
             % (
@@ -393,8 +400,12 @@ class CryptoBot:
             and self.trend_adx >= self.adx_threshold
         )
 
+        # Trend Bearish: Prezzo 15m sotto EMA200, ADX in spinta, e prezzo
+        # non in fase di spike sopra la SMA20 15m (tolleranza 1.5% per pullback ribassisti sani)
         self.trend_bearish = (
             self.trend_price < self.trend_ema200
+            and self.trend_price <= (self.trend_sma1 * 1.015)
+            and self.trend_adx >= self.adx_threshold
         )
 
         return self.trend_bullish
@@ -703,6 +714,178 @@ class CryptoBot:
             return False
 
     # ==========================================================
+    # HARD STOP LOSS SHORT
+    # ==========================================================
+    def check_hard_stop_short(self):
+        if self.position_side != "SHORT" or self.cryptoCoin <= 0 or self.priceMin <= 0:
+            return False
+
+        coin_symbol = self.market.split("/")[0]
+        max_loss_pct = getattr(self, "max_loss_pct", 0.01)
+        hard_stop_atr_mult = getattr(self, "hard_stop_atr_mult", 2.0)
+        floor_distance = self.priceMin * max_loss_pct
+        atr_distance = (self.atr or 0) * hard_stop_atr_mult
+        is_break_even = self.take_profit_hit
+
+        if is_break_even:
+            # Sposta l'hard stop a break-even (prezzo di ingresso - 0.20% per lo short)
+            stop_price = self.priceMin * (1.0 - 0.002)
+        else:
+            stop_price = self.priceMin + max(floor_distance, atr_distance)
+
+        if self.price < stop_price:
+            return False
+
+        stop_name = "BREAK-EVEN STOP SHORT" if is_break_even else "HARD STOP SHORT"
+        print("")
+        print("=" * 60)
+        print("!!! %s !!!" % stop_name)
+        print("Prezzo medio Short: %.4f" % self.priceMin)
+        print("Prezzo corrente:    %.4f" % self.price)
+        print("Trigger Stop:       %.4f" % stop_price)
+        print("Posizione Short:    %.4f %s" % (self.cryptoCoin, coin_symbol))
+        print("=" * 60)
+
+        try:
+            amount = self.wallet_binance.round_size(coin_symbol, self.cryptoCoin)
+            if amount <= 0:
+                return False
+
+            result = self.wallet_binance.close_short(self.market, amount, self.price)
+            if not result.get("filled", False):
+                print("%s NON ESEGUITO: %s" % (stop_name, result.get("error")))
+                return False
+
+            fill_price = result.get("fill_price", self.price)
+            pnl = result.get("pnl", 0.0)
+            fee = result.get("fee", 0.0)
+
+            self.data_binance.cronoMacdString(
+                "%s | Entry %.4f | Trigger %.4f | Fill %.4f | PnL %.4f | Fee %.4f"
+                % (stop_name, self.priceMin, stop_price, fill_price, pnl, fee)
+            )
+
+            self.buy_entries = 0
+            self.buy_armed = True
+            self.previous_histogram = None
+            self.take_profit_hit = False
+            self.entry_time = None
+            self.wallet()
+            return True
+
+        except Exception as e:
+            print("Errore %s: %s" % (stop_name, e))
+            return False
+
+    # ==========================================================
+    # TAKE PROFIT PARZIALE SHORT
+    # ==========================================================
+    def check_take_profit_short(self):
+        if self.position_side != "SHORT" or self.cryptoCoin <= 0 or self.priceMin <= 0 or self.take_profit_hit:
+            return False
+
+        tp_distance = (self.atr or 0) * 1.5
+        tp_price = self.priceMin - tp_distance
+
+        if self.price <= tp_price and tp_distance > 0:
+            print("")
+            print("=" * 60)
+            print("!!! TAKE PROFIT PARZIALE SHORT (1.5x ATR) !!!")
+            print("Prezzo medio Short: %.4f" % self.priceMin)
+            print("Prezzo corrente:    %.4f" % self.price)
+            print("Target:             %.4f (-%.4f)" % (tp_price, tp_distance))
+            print("=" * 60)
+
+            coin_symbol = self.market.split("/")[0]
+            sell_amount = self.wallet_binance.round_size(coin_symbol, self.cryptoCoin * 0.5)
+            if sell_amount <= 0:
+                return False
+
+            try:
+                result = self.wallet_binance.close_short(self.market, sell_amount, self.price)
+                if result.get("filled", False):
+                    self.take_profit_hit = True
+                    fill_price = result.get("fill_price", self.price)
+                    pnl = result.get("pnl", 0.0)
+                    self.data_binance.cronoMacdString(
+                        "TAKE PROFIT PARZIALE SHORT 50%% | Fill %.4f | PnL %.4f" % (fill_price, pnl)
+                    )
+                    self.wallet()
+                    return True
+                else:
+                    print("TAKE PROFIT SHORT NON ESEGUITO: %s" % result.get("error"))
+            except Exception as e:
+                print("Errore TAKE PROFIT SHORT: %s" % e)
+        return False
+
+    # ==========================================================
+    # USCITA TECNICA ANTICIPATA SHORT
+    # ==========================================================
+    def check_technical_exit_short(self):
+        if self.position_side != "SHORT" or self.cryptoCoin <= 0 or self.priceMin <= 0:
+            return False
+
+        if not hasattr(self, "entry_time") or self.entry_time is None:
+            return False
+
+        elapsed = time.time() - self.entry_time
+        time_limit = getattr(self, "time_stop_seconds", 3600.0)
+
+        is_stagnant_loss = (
+            elapsed >= time_limit
+            and self.price > self.priceMin
+            and self.last_histogram is not None
+            and self.previous_histogram is not None
+            and self.last_histogram > self.previous_histogram
+            and getattr(self, "last_rsi", 50.0) > 52.0
+        )
+
+        if not is_stagnant_loss:
+            return False
+
+        print("")
+        print("=" * 60)
+        print("!!! USCITA TECNICA ANTICIPATA SHORT (MOMENTUM INVALIDATION) !!!")
+        print("Durata trade Short: %.1f min" % (elapsed / 60))
+        print("Prezzo medio Short: %.4f" % self.priceMin)
+        print("Prezzo corrente:    %.4f" % self.price)
+        loss_pct = (((self.price - self.priceMin) / self.priceMin) * 100) if self.priceMin > 0 else 0
+        print("Perdita parziale:   %.2f%%" % loss_pct)
+        print("=" * 60)
+
+        coin_symbol = self.market.split("/")[0]
+        try:
+            amount = self.wallet_binance.round_size(coin_symbol, self.cryptoCoin)
+            if amount <= 0:
+                return False
+
+            result = self.wallet_binance.close_short(self.market, amount, self.price)
+            if not result.get("filled", False):
+                print("USCITA TECNICA SHORT NON ESEGUITA: %s" % result.get("error"))
+                return False
+
+            fill_price = result.get("fill_price", self.price)
+            pnl = result.get("pnl", 0.0)
+            fee = result.get("fee", 0.0)
+
+            self.data_binance.cronoMacdString(
+                "USCITA TECNICA SHORT | Entry %.4f | Fill %.4f | PnL %.4f | Fee %.4f | Durata %.0fm"
+                % (self.priceMin, fill_price, pnl, fee, elapsed / 60)
+            )
+
+            self.buy_entries = 0
+            self.buy_armed = True
+            self.previous_histogram = None
+            self.take_profit_hit = False
+            self.entry_time = None
+            self.wallet()
+            return True
+
+        except Exception as e:
+            print("Errore USCITA TECNICA SHORT: %s" % e)
+            return False
+
+    # ==========================================================
     # BUY RISK FILTER
     # ==========================================================
     def can_open_buy(self):
@@ -742,7 +925,7 @@ class CryptoBot:
 
         if (
             position_value + next_buy_value
-            > max_position
+            > max_position + 0.50
         ):
             print(
                 "RISK FILTER [NO BUY] | MAX POSITION"
@@ -978,22 +1161,22 @@ class CryptoBot:
                 continue
 
             # --------------------------------------------------
-            # HARD STOP
+            # GESTIONE RISCHIO USCITE LONG E SHORT
             # --------------------------------------------------
-            if self.check_hard_stop():
-                continue
-
-            # --------------------------------------------------
-            # TAKE PROFIT
-            # --------------------------------------------------
-            if self.check_take_profit():
-                continue
-
-            # --------------------------------------------------
-            # USCITA TECNICA ANTICIPATA (TIME/MOMENTUM)
-            # --------------------------------------------------
-            if self.check_technical_exit():
-                continue
+            if self.position_side == "LONG":
+                if self.check_hard_stop():
+                    continue
+                if self.check_take_profit():
+                    continue
+                if self.check_technical_exit():
+                    continue
+            elif self.position_side == "SHORT":
+                if self.check_hard_stop_short():
+                    continue
+                if self.check_take_profit_short():
+                    continue
+                if self.check_technical_exit_short():
+                    continue
 
             # --------------------------------------------------
             # TREND FLIP EXIT (opzionale, default "n")
@@ -1113,9 +1296,9 @@ class CryptoBot:
                 "TREND15m SMA20: %.4f | "
                 "TREND15m EMA200: %.4f | "
                 "TREND15m ADX: %.1f | "
-                "TREND15m Bullish: %s | "
-                "%s: %.2f | %s: %.4f | "
-                "trailBuy: %s | trailSell: %s | "
+                "TREND15m Bullish: %s | TREND15m Bearish: %s | "
+                "%s: %.2f | %s: %.4f | side: %s | "
+                "trailBuy: %s | trailSell: %s | trailShort: %s | trailCover: %s | "
                 "buyEntries: %d | buyArmed: %s"
                 % (
                     self.multiSize,
@@ -1134,12 +1317,16 @@ class CryptoBot:
                     self.trend_ema200,
                     self.trend_adx,
                     self.trend_bullish,
+                    self.trend_bearish,
                     self.stableName,
                     self.stableCoin,
                     self.cryptoName,
                     self.cryptoCoin,
+                    self.position_side,
                     self.trailBuy,
                     self.trailSell,
+                    self.trailShort,
+                    self.trailCover,
                     self.buy_entries,
                     self.buy_armed,
                 )
@@ -1293,7 +1480,7 @@ class CryptoBot:
                     )
 
                 # ==============================================
-                # DIMINUZIONE POSITIVO -> SELL
+                # DIMINUZIONE POSITIVO -> SELL LONG o ENTRY SHORT
                 # ==============================================
                 elif (
                     self.last_macd > self.last_signal
@@ -1312,68 +1499,55 @@ class CryptoBot:
                         "[ok]"
                     )
 
-                    if self.last_rsi > 40:
-                        print(
-                            "RSI positivo [ok]"
-                        )
-
-                        if (
-                            self.cryptoCoin
-                            * self.price
-                        ) > 10:
-                            print(
-                                "Wallet Crypto [ok]"
-                            )
-
-                            if True:
-                                print(
-                                    "Vincolo prezzo medio rimosso [ok]"
+                    # Uscita LONG
+                    if self.position_side == "LONG":
+                        if self.last_rsi > 40:
+                            print("RSI positivo [ok]")
+                            if (self.cryptoCoin * self.price) > 10 and self.trailSell:
+                                self.data_binance.cronoMacd(now, self.last_histogram, self.last_macd, self.last_signal, trend, self.last_rsi, "sell")
+                                task = StopTrail(
+                                    self.market, "sell", self.stopSize, self.interval, self.multiSize,
+                                    self.stableBot, self.percCoin, self.real, self.stoplossorder,
+                                    self.wallet_binance, self.data_binance,
                                 )
+                                task.run()
+                                self.wallet()
+                                if self.cryptoCoin <= 0:
+                                    self.buy_entries = 0
+                                    self.buy_armed = True
+                                    self.previous_histogram = None
+                                    self.entry_time = None
 
-                                if self.trailSell:
-                                    self.data_binance.cronoMacd(
-                                        now,
-                                        self.last_histogram,
-                                        self.last_macd,
-                                        self.last_signal,
-                                        trend,
-                                        self.last_rsi,
-                                        "sell",
+                    # Ingresso SHORT (inversione ribassista dopo pullback rialzista)
+                    elif self.position_side == "FLAT" and self.enable_short:
+                        if self.last_rsi > 45:
+                            if not self.trend_bearish:
+                                print("TREND FILTER [NO SHORT]")
+                                self.data_binance.cronoMacdString(
+                                    "SHORT BLOCCATO | Trend %s non bearish | Price %.4f | EMA200 %.4f"
+                                    % (self.trend_timeframe, self.trend_price, self.trend_ema200)
+                                )
+                            elif self.can_open_buy() and self.trailShort:
+                                self.data_binance.cronoMacd(now, self.last_histogram, self.last_macd, self.last_signal, trend, self.last_rsi, "short")
+                                task = StopTrail(
+                                    self.market, "short", self.shortStopSize, self.interval, self.multiSize,
+                                    self.stableBot, self.percCoin, self.real, self.stoplossorder,
+                                    self.wallet_binance, self.data_binance, max_duration=self.trail_buy_timeout,
+                                )
+                                task.run()
+                                self.wallet()
+                                if self.cryptoCoin > 0 and self.priceMin > 0:
+                                    self.buy_entries += 1
+                                    self.buy_armed = False
+                                    if getattr(self, "entry_time", None) is None:
+                                        self.entry_time = time.time()
+                                    self.data_binance.cronoMacdString(
+                                        "RISK | SHORT entry #%d | entry %.4f | size %.4f"
+                                        % (self.buy_entries, self.priceMin, self.cryptoCoin)
                                     )
-                                    task = StopTrail(
-                                        self.market,
-                                        "sell",
-                                        self.stopSize,
-                                        self.interval,
-                                        self.multiSize,
-                                        self.stableBot,
-                                        self.percCoin,
-                                        self.real,
-                                        self.stoplossorder,
-                                        self.wallet_binance,
-                                        self.data_binance,
-                                    )
-                                    task.run()
-                                    self.wallet()
-
-                                    if self.cryptoCoin <= 0:
-                                        self.buy_entries = 0
-                                        self.buy_armed = True
-                                        self.previous_histogram = None
-                                        self.entry_time = None
-                                else:
-                                    print(
-                                        "trailSell False"
-                                    )
-                        else:
-                            print("zero coin")
-                    else:
-                        print(
-                            "RSI negativo [no]"
-                        )
 
                 # ==============================================
-                # DIMINUZIONE NEGATIVO -> BUY
+                # DIMINUZIONE NEGATIVO -> BUY LONG o COVER SHORT
                 # ==============================================
                 elif (
                     self.last_macd < self.last_signal
@@ -1392,136 +1566,155 @@ class CryptoBot:
                         "[ok]"
                     )
 
-                    if self.last_rsi < 55:
-                        print(
-                            "RSI negativo [ok]"
-                        )
+                    # Uscita SHORT (ricopertura in trailing)
+                    if self.position_side == "SHORT":
+                        if self.last_rsi < 55 and (self.cryptoCoin * self.price) > 10 and self.trailCover:
+                            self.data_binance.cronoMacd(now, self.last_histogram, self.last_macd, self.last_signal, trend, self.last_rsi, "cover")
+                            task = StopTrail(
+                                self.market, "cover", self.stopSize, self.interval, self.multiSize,
+                                self.stableBot, self.percCoin, self.real, self.stoplossorder,
+                                self.wallet_binance, self.data_binance,
+                            )
+                            task.run()
+                            self.wallet()
+                            if self.cryptoCoin <= 0:
+                                self.buy_entries = 0
+                                self.buy_armed = True
+                                self.previous_histogram = None
+                                self.entry_time = None
 
-                        # --------------------------------------
-                        # TREND 15m OPPURE SNIPER OVERSOLD (<28)
-                        # --------------------------------------
-                        oversold_reversal = (self.last_rsi < 28.0)
-                        if not (self.trend_bullish or oversold_reversal):
+                    # Ingresso LONG (solo se FLAT)
+                    elif self.position_side == "FLAT":
+                        if self.last_rsi < 55:
                             print(
-                                "TREND FILTER [NO BUY]"
-                            )
-                            print(
-                                "  Price %s: %.4f"
-                                % (
-                                    self.trend_timeframe,
-                                    self.trend_price,
-                                )
-                            )
-                            print(
-                                "  SMA20 %s: %.4f"
-                                % (
-                                    self.trend_timeframe,
-                                    self.trend_sma1,
-                                )
-                            )
-                            print(
-                                "  EMA200 %s: %.4f"
-                                % (
-                                    self.trend_timeframe,
-                                    self.trend_ema200,
-                                )
-                            )
-                            print(
-                                "  ADX %s: %.1f"
-                                % (
-                                    self.trend_timeframe,
-                                    self.trend_adx,
-                                )
-                            )
-                            self.data_binance.cronoMacdString(
-                                "BUY BLOCCATO | "
-                                "Trend %s non bullish | "
-                                "Price %.4f | SMA20 %.4f | "
-                                "EMA200 %.4f | ADX %.1f"
-                                % (
-                                    self.trend_timeframe,
-                                    self.trend_price,
-                                    self.trend_sma1,
-                                    self.trend_ema200,
-                                    self.trend_adx,
-                                )
+                                "RSI negativo [ok]"
                             )
 
-                        elif self.stableCoin > 10:
-                            if oversold_reversal and not self.trend_bullish:
-                                print("SNIPER OVERSOLD [RSI %.2f < 28] -> BUY consentito sotto EMA200" % self.last_rsi)
-                                self.data_binance.cronoMacdString(
-                                    "SNIPER OVERSOLD ATTIVO | RSI %.2f < 28" % self.last_rsi
+                            # --------------------------------------
+                            # TREND 15m OPPURE SNIPER OVERSOLD (<28)
+                            # --------------------------------------
+                            oversold_reversal = (self.last_rsi < 28.0)
+                            if not (self.trend_bullish or oversold_reversal):
+                                print(
+                                    "TREND FILTER [NO BUY]"
                                 )
-                            print(
-                                "Wallet Stable >10 [ok]"
-                            )
-
-                            # ----------------------------------
-                            # RISK MANAGEMENT
-                            # ----------------------------------
-                            if not self.can_open_buy():
-                                pass
-                            elif self.trailBuy:
-                                self.data_binance.cronoMacd(
-                                    now,
-                                    self.last_histogram,
-                                    self.last_macd,
-                                    self.last_signal,
-                                    trend,
-                                    self.last_rsi,
-                                    "buy",
-                                )
-                                task = StopTrail(
-                                    self.market,
-                                    "buy",
-                                    self.buyStopSize,
-                                    self.interval,
-                                    self.multiSize,
-                                    self.stableBot,
-                                    self.percCoin,
-                                    self.real,
-                                    self.stoplossorder,
-                                    self.wallet_binance,
-                                    self.data_binance,
-                                    max_duration=self.trail_buy_timeout,
-                                )
-                                task.run()
-                                self.wallet()
-
-                                if (
-                                    self.cryptoCoin > 0
-                                    and self.priceMin > 0
-                                ):
-                                    self.buy_entries += 1
-                                    self.buy_armed = False
-                                    if getattr(self, "entry_time", None) is None:
-                                        self.entry_time = time.time()
-                                    print(
-                                        "RISK | BUY entry #%d"
-                                        % self.buy_entries
+                                print(
+                                    "  Price %s: %.4f"
+                                    % (
+                                        self.trend_timeframe,
+                                        self.trend_price,
                                     )
+                                )
+                                print(
+                                    "  SMA20 %s: %.4f"
+                                    % (
+                                        self.trend_timeframe,
+                                        self.trend_sma1,
+                                    )
+                                )
+                                print(
+                                    "  EMA200 %s: %.4f"
+                                    % (
+                                        self.trend_timeframe,
+                                        self.trend_ema200,
+                                    )
+                                )
+                                print(
+                                    "  ADX %s: %.1f"
+                                    % (
+                                        self.trend_timeframe,
+                                        self.trend_adx,
+                                    )
+                                )
+                                self.data_binance.cronoMacdString(
+                                    "BUY BLOCCATO | "
+                                    "Trend %s non bullish | "
+                                    "Price %.4f | SMA20 %.4f | "
+                                    "EMA200 %.4f | ADX %.1f"
+                                    % (
+                                        self.trend_timeframe,
+                                        self.trend_price,
+                                        self.trend_sma1,
+                                        self.trend_ema200,
+                                        self.trend_adx,
+                                    )
+                                )
+
+                            elif self.stableCoin > 10:
+                                if oversold_reversal and not self.trend_bullish:
+                                    print("SNIPER OVERSOLD [RSI %.2f < 28] -> BUY consentito sotto EMA200" % self.last_rsi)
                                     self.data_binance.cronoMacdString(
-                                        "RISK | BUY entry #%d | "
-                                        "entry %.4f | size %.4f"
-                                        % (
-                                            self.buy_entries,
-                                            self.priceMin,
-                                            self.cryptoCoin,
+                                        "SNIPER OVERSOLD ATTIVO | RSI %.2f < 28" % self.last_rsi
+                                    )
+                                print(
+                                    "Wallet Stable >10 [ok]"
+                                )
+
+                                # ----------------------------------
+                                # RISK MANAGEMENT
+                                # ----------------------------------
+                                if not self.can_open_buy():
+                                    pass
+                                elif self.trailBuy:
+                                    self.data_binance.cronoMacd(
+                                        now,
+                                        self.last_histogram,
+                                        self.last_macd,
+                                        self.last_signal,
+                                        trend,
+                                        self.last_rsi,
+                                        "buy",
+                                    )
+                                    task = StopTrail(
+                                        self.market,
+                                        "buy",
+                                        self.buyStopSize,
+                                        self.interval,
+                                        self.multiSize,
+                                        self.stableBot,
+                                        self.percCoin,
+                                        self.real,
+                                        self.stoplossorder,
+                                        self.wallet_binance,
+                                        self.data_binance,
+                                        max_duration=self.trail_buy_timeout,
+                                    )
+                                    task.run()
+                                    self.wallet()
+
+                                    if (
+                                        self.cryptoCoin > 0
+                                        and self.priceMin > 0
+                                    ):
+                                        self.buy_entries += 1
+                                        self.buy_armed = False
+                                        if getattr(self, "entry_time", None) is None:
+                                            self.entry_time = time.time()
+                                        print(
+                                            "RISK | BUY entry #%d"
+                                            % self.buy_entries
                                         )
+                                        self.data_binance.cronoMacdString(
+                                            "RISK | BUY entry #%d | "
+                                            "entry %.4f | size %.4f"
+                                            % (
+                                                self.buy_entries,
+                                                self.priceMin,
+                                                self.cryptoCoin,
+                                            )
+                                        )
+                                else:
+                                    print(
+                                        "trailBuy False"
                                     )
                             else:
                                 print(
-                                    "trailBuy False"
+                                    "zero stableCoin [no]"
                                 )
                         else:
                             print(
-                                "zero stableCoin [no]"
+                                "RSI positivo [no]"
                             )
-                    else:
-                        print(
-                            "RSI positivo [no]"
-                        )
 
                 # ==============================================
                 # AUMENTO NEGATIVO
@@ -1531,13 +1724,7 @@ class CryptoBot:
                     and self.last_histogram
                     < self.previous_histogram
                 ):
-                    print(
-                        "Differenza: %s"
-                        % diff
-                    )
-                    trend = (
-                        "MACD: Aumento negativo"
-                    )
+                    trend = "MACD: Aumento negativo"
                     print(
                         trend,
                         "[no]"
@@ -1623,25 +1810,36 @@ class CryptoBot:
             self.cryptoCoin * self.percCoin,
         )
 
-        # Fonte unica del prezzo medio:
-        # paper -> entry_px
-        # reale -> entryPx Hyperliquid
+        # Fonte unica del prezzo medio e side della posizione:
+        # paper -> entry_px, side
+        # reale -> entryPx, side Hyperliquid
         self.priceMin = (
             self.wallet_binance.get_entry_price(
                 self.market
             )
         )
+        self.position_side = (
+            self.wallet_binance.get_position_side(
+                self.market
+            )
+        )
 
-        # SELL trailing disponibile se abbiamo coin (anche in perdita)
-        if self.cryptoCoin > 0:
+        # Gestione stati trailing LONG / SHORT / FLAT
+        if self.cryptoCoin > 0 and self.position_side == "LONG":
             self.trailSell = True
-        else:
+            self.trailCover = False
+            self.trailBuy = False
+            self.trailShort = False
+        elif self.cryptoCoin > 0 and self.position_side == "SHORT":
+            self.trailCover = True
             self.trailSell = False
+            self.trailBuy = False
+            self.trailShort = False
+        else:
+            self.position_side = "FLAT"
+            self.trailSell = False
+            self.trailCover = False
             self.take_profit_hit = False
             self.entry_time = None
-
-        # BUY trailing disponibile se abbiamo almeno 10 USDC investibili
-        if self.stableBot > 10:
-            self.trailBuy = True
-        else:
-            self.trailBuy = False
+            self.trailBuy = (self.stableBot > 10)
+            self.trailShort = (self.stableBot > 10 and self.enable_short)

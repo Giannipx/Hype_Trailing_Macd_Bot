@@ -41,6 +41,7 @@ class BacktestWallet:
     def __init__(self, cash_usd, sz=0.0):
         self.cash_usd = cash_usd
         self.sz = sz
+        self.side = "FLAT"
         self.entry_px = 0.0
         self.entry_is_real = False
         self.realized_pnl_usd = 0.0
@@ -58,11 +59,12 @@ class BacktestWallet:
         fee = sz * price * config.FEE_PCT
         old_sz = self.sz
         self.cash_usd -= sz * price + fee
-        if old_sz > 0 and self.entry_is_real:
+        if old_sz > 0 and self.entry_is_real and self.side == "LONG":
             self.entry_px = ((self.entry_px * old_sz) + (price * sz)) / (old_sz + sz)
         else:
             self.entry_px = price
         self.entry_is_real = True
+        self.side = "LONG"
         self.sz = old_sz + sz
         self.fees_usd += fee
         self.n_trades += 1
@@ -75,17 +77,55 @@ class BacktestWallet:
         fee = sz * price * config.FEE_PCT
         realized = (price - self.entry_px) * sz - fee
         self.cash_usd += sz * price - fee
-        self.sz -= sz
-        if self.sz <= 0:
+        self.sz = round(max(0.0, self.sz - sz), 6)
+        if self.sz <= 1e-5:
             self.sz = 0.0
             self.entry_px = 0.0
             self.entry_is_real = False
+            self.side = "FLAT"
+        self.realized_pnl_usd += realized
+        self.fees_usd += fee
+        self.n_trades += 1
+        return fee, realized
+
+    def open_short(self, sz, price):
+        if sz <= 0:
+            return 0.0
+        fee = sz * price * config.FEE_PCT
+        old_sz = self.sz
+        self.cash_usd -= fee
+        if old_sz > 0 and self.entry_is_real and self.side == "SHORT":
+            self.entry_px = ((self.entry_px * old_sz) + (price * sz)) / (old_sz + sz)
+        else:
+            self.entry_px = price
+        self.entry_is_real = True
+        self.side = "SHORT"
+        self.sz = old_sz + sz
+        self.fees_usd += fee
+        self.n_trades += 1
+        return fee
+
+    def close_short(self, sz, price):
+        sz = min(sz, self.sz)
+        if sz <= 0:
+            return 0.0, 0.0
+        fee = sz * price * config.FEE_PCT
+        realized = (self.entry_px - price) * sz - fee
+        self.cash_usd += realized
+        self.sz = round(max(0.0, self.sz - sz), 6)
+        if self.sz <= 1e-5:
+            self.sz = 0.0
+            self.entry_px = 0.0
+            self.entry_is_real = False
+            self.side = "FLAT"
         self.realized_pnl_usd += realized
         self.fees_usd += fee
         self.n_trades += 1
         return fee, realized
 
     def equity(self, price):
+        if self.side == "SHORT":
+            return self.cash_usd + (self.entry_px - price) * self.sz
         return self.cash_usd + self.sz * price
 
 
@@ -116,27 +156,32 @@ def compute_cycle_indicators(window_candles, atr_period):
     }
 
 
-def trend_bullish_at(trend_candles, trend_close_times, as_of_ms, adx_threshold=20.0):
+def trend_status_at(trend_candles, trend_close_times, as_of_ms, adx_threshold=20.0):
     idx = bisect.bisect_right(trend_close_times, as_of_ms) - 1
     if idx < 0:
-        return None, None
+        return None, None, None
     window = trend_candles[max(0, idx - 300 + 1): idx + 1]
     closes = [c[4] for c in window]
     min_required = 200
     if len(closes) < min_required:
-        return None, None
+        return None, None, None
     sma1 = indicators.sma(closes, SMA1_PERIOD)
     ema200 = indicators.ema(closes, 200)
     adx_val = indicators.adx(window, 14)
     if sma1 is None or ema200 is None or adx_val is None:
-        return None, None
+        return None, None, None
     trend_price = closes[-1]
     bullish = (
         trend_price > ema200
         and trend_price >= (sma1 * 0.985)
         and adx_val >= adx_threshold
     )
-    return bullish, {"price": trend_price, "sma1": sma1, "ema200": ema200, "adx": adx_val}
+    bearish = (
+        trend_price < ema200
+        and trend_price <= (sma1 * 1.015)
+        and adx_val >= adx_threshold
+    )
+    return bullish, bearish, {"price": trend_price, "sma1": sma1, "ema200": ema200, "adx": adx_val}
 
 
 # ==================================================================
@@ -151,7 +196,7 @@ def can_open_buy(wallet, price, buy_entries, buy_armed, stableBot_usd):
     equity = wallet.cash_usd + position_value
     max_position = equity * CryptoBot.MAX_POSITION_PCT
     next_buy_value = stableBot_usd
-    if position_value + next_buy_value > max_position:
+    if position_value + next_buy_value > max_position + 0.50:
         return False
     return True
 
@@ -186,26 +231,26 @@ def simulate_trail(candles, start_idx, kind, stopsize, stableBotUsd, perc_coin,
                    wallet, hl_util, symbol, sell_stops, equity_curve,
                    max_buy_candles=4, max_drop_mult=3.0):
     price0 = candles[start_idx][4]
-    if kind == "buy":
+    if kind in ("buy", "cover"):
         stoploss = price0 + stopsize
-    else:
+    else:  # sell, short
         stoploss = price0 - stopsize
 
     for idx in range(start_idx + 1, len(candles)):
-        # Timeout del trailing BUY (esattamente come max_duration in trailMacd.py)
-        if kind == "buy" and max_buy_candles > 0 and (idx - start_idx) > max_buy_candles:
+        # Timeout del trailing BUY e SHORT (esattamente come max_duration in trailMacd.py)
+        if kind in ("buy", "short") and max_buy_candles > 0 and (idx - start_idx) > max_buy_candles:
             return idx - 1, False, {"reason": "TIMEOUT"}
 
         path = intrabar_path(candles[idx])
         for p in path:
-            stop_fills = execute_sell_stops(
-                p, wallet, sell_stops, hl_util, symbol,
-            )
-            if stop_fills:
-                equity_curve.append((candles[idx][0], wallet.equity(candles[idx][4])))
-                return idx, True, stop_fills[-1]
-
             if kind == "sell":
+                stop_fills = execute_sell_stops(
+                    p, wallet, sell_stops, hl_util, symbol,
+                )
+                if stop_fills:
+                    equity_curve.append((candles[idx][0], wallet.equity(candles[idx][4])))
+                    return idx, True, stop_fills[-1]
+
                 if (p - stopsize) > stoploss:
                     stoploss = p - stopsize
                 elif p <= stoploss:
@@ -218,7 +263,7 @@ def simulate_trail(candles, start_idx, kind, stopsize, stableBotUsd, perc_coin,
                     return idx, True, {
                         "type": "SELL", "fill_price": p, "fee": fee, "pnl": pnl, "sz": coin_sell,
                     }
-            else:  # buy
+            elif kind == "buy":
                 # Invalidazione per breakdown (drop > 3x stopsize)
                 if (price0 - p) > (stopsize * max_drop_mult):
                     equity_curve.append((candles[idx][0], wallet.equity(candles[idx][4])))
@@ -236,6 +281,36 @@ def simulate_trail(candles, start_idx, kind, stopsize, stableBotUsd, perc_coin,
                     return idx, True, {
                         "type": "BUY", "fill_price": p, "fee": fee, "sz": amount,
                     }
+            elif kind == "short":
+                # Invalidazione per spike rialzista (spike > 3x stopsize)
+                if (p - price0) > (stopsize * max_drop_mult):
+                    equity_curve.append((candles[idx][0], wallet.equity(candles[idx][4])))
+                    return idx, False, {"reason": "BREAKOUT"}
+
+                if (p - stopsize) > stoploss:
+                    stoploss = p - stopsize
+                elif p <= stoploss:
+                    stable_short = stableBotUsd
+                    amount = hl_util.usd_to_size(symbol, stable_short, p)
+                    if amount <= 0:
+                        continue
+                    fee = wallet.open_short(amount, p)
+                    equity_curve.append((candles[idx][0], wallet.equity(candles[idx][4])))
+                    return idx, True, {
+                        "type": "SHORT", "fill_price": p, "fee": fee, "sz": amount,
+                    }
+            elif kind == "cover":
+                if (p + stopsize) < stoploss:
+                    stoploss = p + stopsize
+                elif p >= stoploss:
+                    coin_cover = hl_util.round_size(symbol, wallet.sz * perc_coin)
+                    if coin_cover <= 0:
+                        continue
+                    fee, pnl = wallet.close_short(coin_cover, p)
+                    equity_curve.append((candles[idx][0], wallet.equity(candles[idx][4])))
+                    return idx, True, {
+                        "type": "COVER", "fill_price": p, "fee": fee, "pnl": pnl, "sz": coin_cover,
+                    }
 
         equity_curve.append((candles[idx][0], wallet.equity(candles[idx][4])))
 
@@ -250,7 +325,7 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
                  atr_period, atr_mult, stoplossorder, max_loss_pct,
                  hard_stop_atr_mult, adx_threshold=20.0,
                  trail_buy_timeout=1200.0, timeframe="5m",
-                 start_cash=1000.0):
+                 start_cash=1000.0, enable_short=False):
     trend_close_times = [c[6] for c in trend_candles]
     wallet = BacktestWallet(cash_usd=start_cash, sz=0.0)
     buy_entries = 0
@@ -281,8 +356,8 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
         stop_size = round(max(stop_floor, atr_value * atr_mult), 4)
         buy_stop_size = round(max(stop_floor * 0.6, atr_value * 1.0), 4)
 
-        trend_ok, _trend_info = trend_bullish_at(trend_candles, trend_close_times, close_time_i, adx_threshold)
-        if trend_ok is None:
+        trend_bullish, trend_bearish, _trend_info = trend_status_at(trend_candles, trend_close_times, close_time_i, adx_threshold)
+        if trend_bullish is None:
             i += 1
             continue
 
@@ -290,77 +365,124 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
         if wallet.sz <= 0:
             take_profit_hit = False
 
-        # ---- HARD STOP E TAKE PROFIT ----
+        # ---- GESTIONE POSIZIONI (LONG o SHORT) ----
         if wallet.sz > 0 and price_min > 0:
-            trigger_fills = []
-            for point in intrabar_path(candles[i]):
-                trigger_fills.extend(
-                    execute_sell_stops(point, wallet, sell_stops, hl_util, symbol)
+            if wallet.side == "LONG":
+                trigger_fills = []
+                for point in intrabar_path(candles[i]):
+                    trigger_fills.extend(
+                        execute_sell_stops(point, wallet, sell_stops, hl_util, symbol)
+                    )
+                if trigger_fills:
+                    for fill in trigger_fills:
+                        trades.append({
+                            "idx": i, "time": candles[i][0], "type": fill["type"],
+                            "price": fill["fill_price"], "sz": fill["sz"],
+                            "fee": fill["fee"], "pnl": fill["pnl"],
+                        })
+                    if wallet.sz <= 0:
+                        buy_entries = 0
+                        buy_armed = True
+                        previous_histogram = None
+                        take_profit_hit = False
+                    equity_curve.append((candles[i][0], wallet.equity(price)))
+                    i += 1
+                    continue
+
+                # 1. TAKE PROFIT PARZIALE LONG (1.5x ATR)
+                if not take_profit_hit:
+                    tp_distance = atr_value * 1.5
+                    tp_price = price_min + tp_distance
+                    tp_fill = next(
+                        (p for p in intrabar_path(candles[i]) if p >= tp_price),
+                        None,
+                    )
+                    if tp_fill is not None:
+                        sell_amount = hl_util.round_size(symbol, wallet.sz * 0.5)
+                        if sell_amount > 0:
+                            fee, pnl = wallet.sell(sell_amount, tp_fill)
+                            trades.append({
+                                "idx": i, "time": candles[i][0], "type": "TAKE_PROFIT_PARZIALE",
+                                "price": tp_fill, "sz": sell_amount, "fee": fee, "pnl": pnl,
+                            })
+                            take_profit_hit = True
+
+                # 2. HARD STOP LONG (con break-even se TP preso)
+                if take_profit_hit:
+                    stop_distance = -(price_min * 0.002)
+                else:
+                    hard_stop_floor = price_min * max_loss_pct
+                    hard_stop_atr_distance = atr_value * hard_stop_atr_mult
+                    stop_distance = max(hard_stop_floor, hard_stop_atr_distance)
+
+                stop_price = price_min - stop_distance
+                stop_fill = next(
+                    (p for p in intrabar_path(candles[i]) if p <= stop_price),
+                    None,
                 )
-            if trigger_fills:
-                for fill in trigger_fills:
+                if (stop_fill is not None
+                        and (amount := hl_util.round_size(symbol, wallet.sz)) > 0):
+                    fee, pnl = wallet.sell(amount, stop_fill)
+                    sell_stops.clear()
                     trades.append({
-                        "idx": i, "time": candles[i][0], "type": fill["type"],
-                        "price": fill["fill_price"], "sz": fill["sz"],
-                        "fee": fill["fee"], "pnl": fill["pnl"],
+                        "idx": i, "time": candles[i][0], "type": "HARD_STOP",
+                        "price": stop_fill, "sz": amount, "fee": fee, "pnl": pnl,
                     })
-                if wallet.sz <= 0:
                     buy_entries = 0
                     buy_armed = True
                     previous_histogram = None
                     take_profit_hit = False
-                equity_curve.append((candles[i][0], wallet.equity(price)))
-                i += 1
-                continue
+                    equity_curve.append((candles[i][0], wallet.equity(price)))
+                    i += 1
+                    continue
 
-            # 1. TAKE PROFIT PARZIALE (1.5x ATR)
-            if not take_profit_hit:
-                tp_distance = atr_value * 1.5
-                tp_price = price_min + tp_distance
+            elif wallet.side == "SHORT":
+                # 1. TAKE PROFIT PARZIALE SHORT (1.5x ATR)
+                if not take_profit_hit:
+                    tp_distance = atr_value * 1.5
+                    tp_price = price_min - tp_distance
+                    tp_fill = next(
+                        (p for p in intrabar_path(candles[i]) if p <= tp_price),
+                        None,
+                    )
+                    if tp_fill is not None:
+                        cover_amount = hl_util.round_size(symbol, wallet.sz * 0.5)
+                        if cover_amount > 0:
+                            fee, pnl = wallet.close_short(cover_amount, tp_fill)
+                            trades.append({
+                                "idx": i, "time": candles[i][0], "type": "TAKE_PROFIT_PARZIALE_SHORT",
+                                "price": tp_fill, "sz": cover_amount, "fee": fee, "pnl": pnl,
+                            })
+                            take_profit_hit = True
 
-                tp_fill = next(
-                    (p for p in intrabar_path(candles[i]) if p >= tp_price),
+                # 2. HARD STOP SHORT (con break-even se TP preso)
+                if take_profit_hit:
+                    stop_distance = -(price_min * 0.002)
+                else:
+                    hard_stop_floor = price_min * max_loss_pct
+                    hard_stop_atr_distance = atr_value * hard_stop_atr_mult
+                    stop_distance = max(hard_stop_floor, hard_stop_atr_distance)
+
+                stop_price = price_min + stop_distance
+                stop_fill = next(
+                    (p for p in intrabar_path(candles[i]) if p >= stop_price),
                     None,
                 )
-                if tp_fill is not None:
-                    sell_amount = hl_util.round_size(symbol, wallet.sz * 0.5)
-                    if sell_amount > 0:
-                        fee, pnl = wallet.sell(sell_amount, tp_fill)
-                        trades.append({
-                            "idx": i, "time": candles[i][0], "type": "TAKE_PROFIT_PARZIALE",
-                            "price": tp_fill, "sz": sell_amount, "fee": fee, "pnl": pnl,
-                        })
-                        take_profit_hit = True
-
-            # 2. HARD STOP (con break-even se TP preso)
-            if take_profit_hit:
-                stop_distance = -(price_min * 0.002)
-            else:
-                hard_stop_floor = price_min * max_loss_pct
-                hard_stop_atr_distance = atr_value * hard_stop_atr_mult
-                stop_distance = max(hard_stop_floor, hard_stop_atr_distance)
-
-            stop_price = price_min - stop_distance
-
-            stop_fill = next(
-                (p for p in intrabar_path(candles[i]) if p <= stop_price),
-                None,
-            )
-            if (stop_fill is not None
-                    and (amount := hl_util.round_size(symbol, wallet.sz)) > 0):
-                fee, pnl = wallet.sell(amount, stop_fill)
-                sell_stops.clear()
-                trades.append({
-                    "idx": i, "time": candles[i][0], "type": "HARD_STOP",
-                    "price": stop_fill, "sz": amount, "fee": fee, "pnl": pnl,
-                })
-                buy_entries = 0
-                buy_armed = True
-                previous_histogram = None
-                take_profit_hit = False
-                equity_curve.append((candles[i][0], wallet.equity(price)))
-                i += 1
-                continue
+                if (stop_fill is not None
+                        and (amount := hl_util.round_size(symbol, wallet.sz)) > 0):
+                    fee, pnl = wallet.close_short(amount, stop_fill)
+                    sell_stops.clear()
+                    trades.append({
+                        "idx": i, "time": candles[i][0], "type": "HARD_STOP_SHORT",
+                        "price": stop_fill, "sz": amount, "fee": fee, "pnl": pnl,
+                    })
+                    buy_entries = 0
+                    buy_armed = True
+                    previous_histogram = None
+                    take_profit_hit = False
+                    equity_curve.append((candles[i][0], wallet.equity(price)))
+                    i += 1
+                    continue
 
         equity_curve.append((candles[i][0], wallet.equity(price)))
 
@@ -372,13 +494,16 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
         if previous_histogram is not None:
             macd_v, signal_v, hist_v = ind["macd"], ind["signal"], ind["histogram"]
 
+            # 1. AUMENTO POSITIVO
             if macd_v > signal_v and hist_v > previous_histogram:
-                pass  # AUMENTO POSITIVO
+                pass
 
+            # 2. DIMINUZIONE POSITIVO -> EXIT LONG oppure ENTRY SHORT
             elif macd_v > signal_v and hist_v < previous_histogram:
-                # DIMINUZIONE POSITIVO -> candidato SELL
                 rsi_v = ind["rsi"]
-                if rsi_v > 40 and wallet.sz * price > 10 and wallet.sz > 0:
+
+                # Uscita LONG
+                if wallet.side == "LONG" and rsi_v > 40 and wallet.sz * price > 10:
                     exit_idx, filled, info = simulate_trail(
                         candles, i, "sell", stop_size, perc_stable, perc_coin,
                         wallet, hl_util, symbol, sell_stops, equity_curve,
@@ -404,34 +529,27 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
                         i = exit_idx + 1
                         continue
 
-            elif macd_v < signal_v and hist_v > previous_histogram:
-                # DIMINUZIONE NEGATIVO -> candidato BUY
-                rsi_v = ind["rsi"]
-                oversold_reversal = (rsi_v < 28.0)
-                if rsi_v < 55 and (trend_ok or oversold_reversal) and wallet.cash_usd > 10:
+                # Ingresso SHORT (inversione ribassista da pullback rialzista)
+                elif wallet.side == "FLAT" and enable_short and rsi_v > 45 and trend_bearish and wallet.cash_usd > 10:
                     equity = wallet.equity(price)
                     risk_amount_usd = equity * max_loss_pct
-
                     atr_dist = atr_value * hard_stop_atr_mult
                     floor_dist = price * max_loss_pct
                     stop_dist = max(floor_dist, atr_dist)
-
                     if stop_dist > 0:
                         coins = risk_amount_usd / stop_dist
                         target_usd = coins * price
-
                         max_allowed = wallet.cash_usd * 0.95
                         max_position_limit = equity * CryptoBot.MAX_POSITION_PCT
                         current_position_value = wallet.sz * price
                         remaining_allowance = max(0, max_position_limit - current_position_value)
-
                         stableBot = round(min(target_usd, max_allowed, remaining_allowance), 2)
                     else:
                         stableBot = round(wallet.cash_usd * perc_stable, 2)
 
                     if can_open_buy(wallet, price, buy_entries, buy_armed, stableBot):
                         exit_idx, filled, info = simulate_trail(
-                            candles, i, "buy", buy_stop_size, stableBot, perc_coin,
+                            candles, i, "short", buy_stop_size, stableBot, perc_coin,
                             wallet, hl_util, symbol, sell_stops, equity_curve,
                             max_buy_candles=max_buy_candles,
                         )
@@ -441,32 +559,110 @@ def run_backtest(candles, trend_candles, symbol, hl_util,
                                 "price": info["fill_price"], "sz": info["sz"],
                                 "fee": info["fee"], "pnl": info.get("pnl"),
                             })
-                            if info["type"] == "STOP_LOSS":
-                                if wallet.sz <= 0:
-                                    buy_entries = 0
-                                    buy_armed = True
-                                previous_histogram = ind["histogram"]
-                                i = exit_idx + 1
-                                continue
                             if wallet.sz > 0 and wallet.get_entry_price() > 0:
                                 buy_entries += 1
                                 buy_armed = False
-                            if stoplossorder == "y":
-                                sell_stops.append({
-                                    "trigger_price": info["fill_price"] - (buy_stop_size * multi_size),
-                                    "sz": wallet.sz,
-                                })
                             previous_histogram = ind["histogram"]
                             i = exit_idx + 1
                             continue
                         else:
                             if info.get("reason") == "EOF":
-                                pending_trail = {"type": "buy", "start_idx": i}
+                                pending_trail = {"type": "short", "start_idx": i}
                             previous_histogram = ind["histogram"]
                             i = exit_idx + 1
                             continue
-            else:
-                pass  # AUMENTO NEGATIVO
+
+            # 3. DIMINUZIONE NEGATIVO -> EXIT SHORT oppure ENTRY LONG
+            elif macd_v < signal_v and hist_v > previous_histogram:
+                rsi_v = ind["rsi"]
+
+                # Uscita SHORT
+                if wallet.side == "SHORT" and rsi_v < 55 and wallet.sz * price > 10:
+                    exit_idx, filled, info = simulate_trail(
+                        candles, i, "cover", stop_size, perc_stable, perc_coin,
+                        wallet, hl_util, symbol, sell_stops, equity_curve,
+                    )
+                    if filled:
+                        trades.append({
+                            "idx": exit_idx, "time": candles[exit_idx][0], "type": info["type"],
+                            "price": info["fill_price"], "sz": info["sz"],
+                            "fee": info["fee"], "pnl": info["pnl"],
+                        })
+                        if wallet.sz <= 0:
+                            buy_entries = 0
+                            buy_armed = True
+                            previous_histogram = None
+                        else:
+                            previous_histogram = ind["histogram"]
+                        i = exit_idx + 1
+                        continue
+                    else:
+                        if info.get("reason") == "EOF":
+                            pending_trail = {"type": "cover", "start_idx": i}
+                        previous_histogram = ind["histogram"]
+                        i = exit_idx + 1
+                        continue
+
+                # Ingresso LONG (solo se FLAT)
+                elif wallet.side == "FLAT":
+                    oversold_reversal = (rsi_v < 28.0)
+                    if rsi_v < 55 and (trend_bullish or oversold_reversal) and wallet.cash_usd > 10:
+                        equity = wallet.equity(price)
+                        risk_amount_usd = equity * max_loss_pct
+                        atr_dist = atr_value * hard_stop_atr_mult
+                        floor_dist = price * max_loss_pct
+                        stop_dist = max(floor_dist, atr_dist)
+                        if stop_dist > 0:
+                            coins = risk_amount_usd / stop_dist
+                            target_usd = coins * price
+                            max_allowed = wallet.cash_usd * 0.95
+                            max_position_limit = equity * CryptoBot.MAX_POSITION_PCT
+                            current_position_value = wallet.sz * price
+                            remaining_allowance = max(0, max_position_limit - current_position_value)
+                            stableBot = round(min(target_usd, max_allowed, remaining_allowance), 2)
+                        else:
+                            stableBot = round(wallet.cash_usd * perc_stable, 2)
+
+                        if can_open_buy(wallet, price, buy_entries, buy_armed, stableBot):
+                            exit_idx, filled, info = simulate_trail(
+                                candles, i, "buy", buy_stop_size, stableBot, perc_coin,
+                                wallet, hl_util, symbol, sell_stops, equity_curve,
+                                max_buy_candles=max_buy_candles,
+                            )
+                            if filled:
+                                trades.append({
+                                    "idx": exit_idx, "time": candles[exit_idx][0], "type": info["type"],
+                                    "price": info["fill_price"], "sz": info["sz"],
+                                    "fee": info["fee"], "pnl": info.get("pnl"),
+                                })
+                                if info["type"] == "STOP_LOSS":
+                                    if wallet.sz <= 0:
+                                        buy_entries = 0
+                                        buy_armed = True
+                                    previous_histogram = ind["histogram"]
+                                    i = exit_idx + 1
+                                    continue
+                                if wallet.sz > 0 and wallet.get_entry_price() > 0:
+                                    buy_entries += 1
+                                    buy_armed = False
+                                if stoplossorder == "y":
+                                    sell_stops.append({
+                                        "trigger_price": info["fill_price"] - (buy_stop_size * multi_size),
+                                        "sz": wallet.sz,
+                                    })
+                                previous_histogram = ind["histogram"]
+                                i = exit_idx + 1
+                                continue
+                            else:
+                                if info.get("reason") == "EOF":
+                                    pending_trail = {"type": "buy", "start_idx": i}
+                                previous_histogram = ind["histogram"]
+                                i = exit_idx + 1
+                                continue
+
+            # 4. AUMENTO NEGATIVO -> nessun ingresso (simmetrico ad AUMENTO POSITIVO)
+            elif macd_v < signal_v and hist_v < previous_histogram:
+                pass
 
         previous_histogram = ind["histogram"]
         i += 1
@@ -506,11 +702,13 @@ def print_report(timeframe, period_label, result, start_cash, last_price, strate
     equity_curve = result["equity_curve"]
 
     n_buy = sum(1 for t in trades if t["type"] == "BUY")
+    n_short = sum(1 for t in trades if t["type"] == "SHORT")
     n_sell = sum(1 for t in trades if t["type"] in ("SELL", "TAKE_PROFIT_PARZIALE"))
-    n_hard_stop = sum(1 for t in trades if t["type"] in ("HARD_STOP", "STOP_LOSS"))
-    sell_trades = [t for t in trades if t["type"] in ("SELL", "TAKE_PROFIT_PARZIALE", "HARD_STOP", "STOP_LOSS")]
-    wins = sum(1 for t in sell_trades if (t["pnl"] or 0) > 0)
-    win_rate = (wins / len(sell_trades) * 100) if sell_trades else 0.0
+    n_cover = sum(1 for t in trades if t["type"] in ("COVER", "TAKE_PROFIT_PARZIALE_SHORT"))
+    n_hard_stop = sum(1 for t in trades if t["type"] in ("HARD_STOP", "HARD_STOP_SHORT", "STOP_LOSS"))
+    exit_trades = [t for t in trades if t.get("pnl") is not None]
+    wins = sum(1 for t in exit_trades if (t["pnl"] or 0) > 0)
+    win_rate = (wins / len(exit_trades) * 100) if exit_trades else 0.0
 
     final_equity = wallet.equity(last_price)
     total_return_pct = ((final_equity - start_cash) / start_cash * 100) if start_cash else 0.0
@@ -521,9 +719,9 @@ def print_report(timeframe, period_label, result, start_cash, last_price, strate
     print("=" * 70)
     print("Candele valutate:      %d" % len(equity_curve))
     print(
-        "Parametri: STOPSIZE $%.2f | ATR %dx%.2f (Buy 1.0x) | MSIZE %.2f | "
+        "Parametri: STOPSIZE $%.2f | ATR %dx%.2f (Entry 1.0x) | MSIZE %.2f | "
         "PERC_STABLE %.2f | PERC_COIN %.2f | MAX_LOSS %.2f%% "
-        "(dinamico ATRx%.1f) | TIMEOUT %gs"
+        "(dinamico ATRx%.1f) | TIMEOUT %gs | SHORT: %s"
         % (
             strategy_params["stop_floor"],
             strategy_params["atr_period"],
@@ -534,15 +732,16 @@ def print_report(timeframe, period_label, result, start_cash, last_price, strate
             strategy_params["max_loss_pct"] * 100,
             strategy_params["hard_stop_atr_mult"],
             strategy_params["trail_buy_timeout"],
+            "y" if strategy_params.get("enable_short") else "n",
         )
     )
-    print("Trade totali:          %d (BUY: %d | SELL/TP: %d | STOP: %d)"
-          % (len(trades), n_buy, n_sell, n_hard_stop))
-    print("Win rate (uscite):     %.1f%% (%d/%d)" % (win_rate, wins, len(sell_trades)))
+    print("Trade totali:          %d (BUY: %d | SHORT: %d | SELL: %d | COVER: %d | STOP: %d)"
+          % (len(trades), n_buy, n_short, n_sell, n_cover, n_hard_stop))
+    print("Win rate (uscite):     %.1f%% (%d/%d)" % (win_rate, wins, len(exit_trades)))
     print("PnL realizzato (uscite): $%.2f" % wallet.realized_pnl_usd)
     print("Fee totali pagate:     $%.2f" % wallet.fees_usd)
     print("Equity iniziale:       $%.2f" % start_cash)
-    print("Equity finale:         $%.2f (posizione aperta: %.4f)" % (final_equity, wallet.sz))
+    print("Equity finale:         $%.2f (pos: %.4f %s)" % (final_equity, wallet.sz, wallet.side))
     print("Rendimento totale:     %+.2f%%" % total_return_pct)
     print("Max drawdown:          $%.2f (%.2f%%)" % (dd_usd, dd_pct))
     if result["pending_trail"]:
@@ -552,7 +751,7 @@ def print_report(timeframe, period_label, result, start_cash, last_price, strate
 
     return {
         "timeframe": timeframe, "period": period_label,
-        "n_trades": len(trades), "n_buy": n_buy, "n_sell": n_sell, "n_hard_stop": n_hard_stop,
+        "n_trades": len(trades), "n_buy": n_buy, "n_short": n_short, "n_sell": n_sell, "n_cover": n_cover, "n_hard_stop": n_hard_stop,
         "win_rate_pct": round(win_rate, 2),
         "realized_pnl_uscite_usd": round(wallet.realized_pnl_usd, 2),
         "fees_usd": round(wallet.fees_usd, 2),
@@ -571,6 +770,7 @@ def print_report(timeframe, period_label, result, start_cash, last_price, strate
         "stoploss": strategy_params["stoploss"],
         "interval": strategy_params["interval"],
         "adx_threshold": strategy_params.get("adx_threshold", 20.0),
+        "enable_short": "y" if strategy_params.get("enable_short") else "n",
     }
 
 
@@ -625,6 +825,7 @@ def main():
     parser.add_argument("--stoploss", choices=("y", "n"), default=None)
     parser.add_argument("--adx-threshold", type=float, default=None)
     parser.add_argument("--trail-buy-timeout", type=float, default=None)
+    parser.add_argument("--enable-short", choices=("y", "n"), default=None)
     parser.add_argument("--start-cash", type=float, default=None)
     args = parser.parse_args()
 
@@ -646,6 +847,7 @@ def main():
     args.hard_stop_atr_mult = param_value(args.hard_stop_atr_mult, params, "HARD_STOP_ATR_MULT", 3.5, float)
     args.adx_threshold = param_value(args.adx_threshold, params, "ADX_THRESHOLD", 20.0, float)
     args.trail_buy_timeout = param_value(args.trail_buy_timeout, params, "TRAIL_BUY_TIMEOUT", 1200.0, float)
+    args.enable_short = (param_value(args.enable_short, params, "ENABLE_SHORT", "n", str).lower() == "y")
     args.stoploss = param_value(args.stoploss, params, "STOPLOSS", "n", str).lower()
     args.interval = param_value(None, params, "INTERVAL", 4, float)
     args.start_cash = config.START_BALANCE_USD if args.start_cash is None else args.start_cash
@@ -663,6 +865,7 @@ def main():
         "trail_buy_timeout": args.trail_buy_timeout,
         "stoploss": args.stoploss,
         "interval": args.interval,
+        "enable_short": args.enable_short,
     }
 
     if (args.start_date is None) != (args.end_date is None):
@@ -710,7 +913,7 @@ def main():
             args.atr_period, args.atr_mult, args.stoploss, args.max_loss_pct,
             args.hard_stop_atr_mult, adx_threshold=args.adx_threshold,
             trail_buy_timeout=args.trail_buy_timeout, timeframe=tf,
-            start_cash=args.start_cash,
+            start_cash=args.start_cash, enable_short=args.enable_short,
         )
         last_price = candles[-1][4]
         summary = print_report(

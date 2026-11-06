@@ -5,10 +5,12 @@ Bot di trading in Python per **perpetual futures su Hyperliquid**, basato su seg
 ## Caratteristiche
 
 - Segnali MACD + RSI per decidere compra/vendi, con doppio controllo sul trend dell'istogramma.
-- Trailing stop (`StopTrail`): dopo un segnale, il bot segue il prezzo a intervalli regolari e aggiorna lo stop loss solo quando il prezzo si muove a favore; il trade parte quando lo stop viene toccato.
+- **Modulo Bi-direzionale (LONG e SHORT)**: consente di operare sia nei trend rialzisti che in quelli ribassisti su Hyperliquid perpetuals (`ENABLE_SHORT=y`).
+- Trailing stop (`StopTrail`): dopo un segnale, il bot segue il prezzo a intervalli regolari e aggiorna lo stop loss solo quando il prezzo si muove a favore (`buy`, `sell`, `short`, `cover`); il trade parte quando lo stop viene toccato.
 - **Paper trading** di default: prezzi reali da mainnet, wallet simulato in `paper_wallet.json` (ripristinabile a ogni avvio dai valori di `walletIniziale.txt`). Nessuna chiave richiesta.
 - **Trading reale** su mainnet (perpetual HYPE) con `market_open` / `market_close`.
 - Indicatori in puro Python (niente pandas/ta).
+- **Backtesting offline integrato** (`backtest.py`) con supporto multi-timeframe e reporting comparativo.
 
 ## Requisiti
 
@@ -52,8 +54,9 @@ MAX_LOSS_PCT=0.01
 | `HARD_STOP_ATR_MULT` | Moltiplicatore ATR per l'hard stop loss (default `4.0`) |
 | `MAX_LOSS_PCT` | Pavimento hard stop dal prezzo medio, come frazione: `0.005` = 0.5% |
 | `ADX_THRESHOLD` | Soglia minima ADX per confermare il trend bullish a 15m (default `20`) |
-| `TRAIL_BUY_TIMEOUT` | Timeout in secondi per invalidare un trailing buy (default `900` = 15m) |
+| `TRAIL_BUY_TIMEOUT` | Timeout in secondi per invalidare un trailing buy/short (default `900` = 15m) |
 | `TREND_FLIP_EXIT` | `y`/`n`: uscita d'emergenza se trend 15m gira bearish (default `n`, evita uscite premature) |
+| `ENABLE_SHORT` | `y`/`n`: abilita il modulo bi-direzionale SHORT per trend ribassisti (default `n`) |
 
 Le altre impostazioni (leva, margine, rete, fee) sono in `config.py`:
 
@@ -105,23 +108,24 @@ La dashboard mostra in tempo reale (auto-refresh regolabile nella sidebar):
 
 ## Come funziona
 
-1. `botMacd.py` calcola MACD/RSI/SMA sull'ultima candela 5m e verifica il trend a 15m (prezzo > EMA200 e ADX >= soglia).
-2. Al segnale di acquisto parte `StopTrail`: segue il prezzo abbassando lo stop loss. Se il trail supera `TRAIL_BUY_TIMEOUT` (15m) o se il prezzo subisce un breakdown oltre 3x stopsize, il segnale viene annullato senza eseguire l'acquisto.
-3. Se lo stop viene toccato, l'ordine BUY viene eseguito.
-4. **Gestione del rischio della posizione aperta**:
-   - **Take Profit Parziale (50%)**: scatta a +1.5x ATR dall'ingresso; chiude il 50% della size e sposta automaticamente lo stop della posizione residua a **Break-Even** (+0.20%).
-   - **Hard Stop Loss Dinamico**: rete di sicurezza a `max(pavimento %, 4x ATR)` sotto il prezzo medio di carico.
-   - **Trailing Sell MACD**: al segnale contrario (MACD decrescente positivo e RSI > 40), `StopTrail` liquida la posizione al rialzo.
+1. `botMacd.py` calcola MACD/RSI/SMA/ADX sull'ultima candela del timeframe di trading e verifica il trend a 15m (prezzo vs EMA200, SMA20 e ADX >= soglia).
+2. **Ingresso LONG**: se trend rialzista (o ipervenduto estremo RSI < 28) e MACD in `Diminuzione Negativo`, parte `StopTrail(buy)` che insegue il prezzo al ribasso. Se il trail supera `TRAIL_BUY_TIMEOUT` o il prezzo collassa oltre 3x stopsize, il trade viene annullato senza acquistare.
+3. **Ingresso SHORT**: se trend ribassista (`Price < EMA200`, `Price <= SMA20 * 1.015`, `ADX >= soglia`) ed `ENABLE_SHORT=y`, su MACD in `Diminuzione Positivo` parte `StopTrail(short)` che insegue il prezzo al ribasso ed entra al primo rimbalzo.
+4. **Gestione del rischio della posizione aperta (LONG e SHORT)**:
+   - **Take Profit Parziale (50%)**: scatta a 1.5x ATR di profitto; chiude il 50% della size e sposta automaticamente lo stop della posizione residua a **Break-Even** (+0.20% per Long, -0.20% per Short).
+   - **Hard Stop Loss Dinamico**: protezione a `max(pavimento %, 2.0x ATR)` dal prezzo medio di carico.
+   - **Trailing Exit MACD**: uscita in trailing al segnale di esaurimento (`Diminuzione Positivo` per Long, `Diminuzione Negativo` per Short).
 5. In reale gli ordini di stop usano `isMarket: True` per garantire l'esecuzione anche con volatilità elevata.
 
 ## Struttura
 
 - `jbmainMacd.py` — entrypoint e parsing dei parametri.
-- `botMacd.py` — loop principale sui segnali, decide buy/sell, TP e Hard Stop.
-- `trailMacd.py` — trailing stop dopo il segnale con protezione timeout e invalidazione breakdown.
-- `indicators.py` — MACD/RSI/SMA in Python puro.
+- `botMacd.py` — loop principale sui segnali, decide buy/sell/short/cover, TP e Hard Stop.
+- `trailMacd.py` — trailing stop dopo il segnale con protezione timeout e invalidazione breakdown (`buy`, `sell`, `short`, `cover`).
+- `indicators.py` — MACD/RSI/SMA/ADX in Python puro.
 - `config.py` — tutte le impostazioni di trading.
-- `hl.py` — unico wrapper per Hyperliquid (saldi, candele, ordini, log).
+- `hl.py` — unico wrapper per Hyperliquid (saldi, candele, ordini reali e simulati, logging).
+- `backtest.py` — motore di backtesting offline con supporto multi-timeframe e simulazione trailing stop.
 - `dashboard.py` — dashboard web Streamlit (parametri, saldi, indicatori, log).
 
 ## Avvertenze

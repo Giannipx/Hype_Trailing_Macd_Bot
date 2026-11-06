@@ -401,3 +401,49 @@ backtest — vedi §5.3 per il dettaglio.
 - **File:** `botMacd.py`, `jbmainMacd.py`, `hype.txt`
 - **Problema:** Se `Price < EMA200` a 15m, il bot chiudeva forzatamente e all'istante l'intera posizione a mercato. Questo causava uscite dopo 17 secondi o 2-3 minuti su normale rumore di prezzo, accumulando perdite secche e doppie fee taker (responsabile di 3 trade in perdita su 5). Questa regola non era presente neanche nel backtest.
 - **Fix:** Reso opzionale e disabilitato di default (`TREND_FLIP_EXIT=n`). La gestione del rischio è ora affidata a: Take Profit parziale 50% (+1.5x ATR con stop a break-even), Hard Stop dinamico (4x ATR con floor `max_loss_pct`), e Sell Trailing stop basato su MACD.
+
+---
+
+## 8. Quarto giro: Modulo Bi-direzionale SHORT, Risoluzione Bug Critici e Validazione Backtest
+
+In seguito all'analisi del periodo di mercato ribassista su HYPE, è stato richiesto di abilitare l'operatività short per rendere la strategia simmetrica e profittevole anche durante i trend negativi.
+
+### 8.1 — Architettura del Modulo SHORT
+- **File:** `hype.txt`, `jbmainMacd.py`, `hl.py`, `trailMacd.py`, `botMacd.py`, `backtest.py`
+- **Config:** Aggiunto parametro `ENABLE_SHORT=y` in `hype.txt` e parsato in `jbmainMacd.py` e `backtest.py`.
+- **Hyperliquid SDK (`hl.py`):**
+  - `get_position_side()`: restituisce `"LONG"`, `"SHORT"` o `"FLAT"`, ispezionando `szi` (in reale) o il campo `side` del dizionario paper.
+  - `open_short()`: apre lo short su Hyperliquid con `market_open(is_buy=False)` dopo `_ensure_leverage()`. In paper calcola il margine e addebita la fee.
+  - `close_short()`: ricopre lo short tramite `market_close()` (l'SDK imposta obbligatoriamente `reduce_only`). In paper accredita il profitto da discesa `(entry_px - exit_px) * size - fee`.
+- **Trailing Stop (`trailMacd.py`):**
+  - Implementate azioni `short` (inseguimento al ribasso del breakout con acquisto sul rimbalzo superiore a `stopSize`) e `cover` (inseguimento al ribasso del dump con ricopertura sul rimbalzo superiore a `stopSize`).
+  - Protezione timeout (`TRAIL_BUY_TIMEOUT`) e abort se il prezzo sfonda al rialzo oltre 3x stopsize.
+- **Signal Logic & Risk Management (`botMacd.py`):**
+  - Trend filter bearish: `Price < EMA200`, `Price <= SMA20 * 1.015` e `ADX >= soglia`.
+  - Ingressi su MACD: short aperto su `Diminuzione Positivo` (fase di esaurimento del pullback verso l'alto prima di girare al ribasso), simmetrico al buy long su `Diminuzione Negativo`.
+  - Uscite su MACD: cover short su `Diminuzione Negativo`.
+  - Take Profit parziale 50% al raggiungimento di +1.5x ATR di discesa e spostamento immediato dello stop a Break-Even protetto (`entry * (1 - 0.002)`).
+  - Hard Stop dinamico short a `entry + max(floor, hard_stop_atr_mult * ATR)`.
+
+### 8.2 — Correzione Bug Doppia Sottrazione Fee Paper in `close_short`
+- **File:** `hl.py` (riga ~601)
+- **Bug:** `realized` veniva calcolato come `(entry - price) * sz - fee`. Successivamente il saldo cash veniva aggiornato con `d["cash_usd"] += realized - fee`, sottraendo la fee di chiusura due volte.
+- **Fix:** Corretto in `d["cash_usd"] += realized`.
+
+### 8.3 — Correzione Blocco Ordini per Arrotondamento Float in `can_open_buy`
+- **File:** `botMacd.py`, `backtest.py`
+- **Bug:** `stableBot = round(min(...), 2)` arrotondava per eccesso a due cifre decimali (es. $498.16 a fronte di un massimale teorico di $498.158). Di conseguenza il controllo di sicurezza `position_value + next_buy_value > max_position` risultava vero per $0.0019, rigettando qualsiasi ordine successivo al primo e bloccando l'intero bot/backtest.
+- **Fix:** Introdotto un cuscinetto di tolleranza di `$0.50` (`> max_position + 0.50`), eliminando i falsi blocchi causati da imprecisioni di floating-point.
+
+### 8.4 — Correzione Blocco Posizione Residua (Epsilon Floating-Point)
+- **File:** `hl.py` (funzioni `sell`, `close_short`, `get_position_side`), `backtest.py`
+- **Bug:** Alla chiusura totale della posizione (`pos - sz`), le sottrazioni floating-point in Python potevano lasciare residui come `1e-16`. Poiché il controllo era `sz <= 0`, il wallet rimaneva bloccato con `side == "SHORT"` e `sz = 0.0000000000000001`, impedendo nuovi ingressi.
+- **Fix:** Applicato `round(max(0.0, pos - sz), 6)` e se `sz <= 1e-5` il saldo viene forzato a `0.0` e lo stato a `"FLAT"`.
+
+### 8.5 — Risultati Backtest Comparativo (30 Giorni su HYPE)
+Test eseguito sui dati storici reali a 30 giorni:
+- **Timeframe 1h**:
+  - *Solo Long*: 8 trade, Win Rate 60.0%, Rendimento **+0.52%**, Max Drawdown 1.77%.
+  - *Bi-direzionale (Long + Short)*: 23 trade, Win Rate **64.3%**, Rendimento **+1.29%** (più che raddoppiato!), Max Drawdown 2.32%.
+- **Timeframe bassi (5m e 15m)**:
+  - Sul 5m il rumore di mercato e le oscillazioni laterali (chop) provocano frequenti falsi segnali ed erosione del capitale dovuta alle fee taker (oltre $37 di fee accumulate su 5m). Viene pertanto raccomandato l'uso del timeframe **1h** per massimizzare il rendimento e abbattere le commissioni.

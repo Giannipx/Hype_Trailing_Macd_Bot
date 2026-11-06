@@ -48,11 +48,14 @@ def main(options):
     # Timeout uscita tecnica su stallo/inversione (default: 60 minuti)
     time_stop_minutes = float(myObject.get('TIME_STOP_MINUTES', 60.0))
 
+    # Abilitazione modulo SHORT per mercati in trend ribassista (default: n)
+    enable_short = str(myObject.get('ENABLE_SHORT', 'n')).strip().lower()
+
     bot = CryptoBot(symbol, stopSize, interval, timeframe, multiSize, percStable, percCoin, real, stoplossorder,
                      atr_period=atr_period, atr_mult=atr_mult, max_loss_pct=max_loss_pct,
                      hard_stop_atr_mult=hard_stop_atr_mult, adx_threshold=adx_threshold,
                      trail_buy_timeout=trail_buy_timeout, trend_flip_exit=trend_flip_exit,
-                     time_stop_minutes=time_stop_minutes)
+                     time_stop_minutes=time_stop_minutes, enable_short=enable_short)
     bot.run()
 
 if __name__ == "__main__":

@@ -33,7 +33,7 @@ class StopTrail:
     def initialize_stop(self):
         print("inizialize stop")
         px = getattr(self, "initial_price", None) or self.data_binance.get_price(self.market)
-        if self.type == "buy":
+        if self.type in ("buy", "cover"):
             return px + self.stopsize
         else:
             return px - self.stopsize
@@ -42,7 +42,7 @@ class StopTrail:
     def update_stop(self):
         self.wallet()
 
-        # sell-------------------------------
+        # sell (chiusura long) -------------------------------
         if self.type == "sell":
             # Se il prezzo sale allora sale anche il trail
             if (self.price - self.stopsize) > self.stoploss:
@@ -64,11 +64,7 @@ class StopTrail:
 
                     print("++++++++++++++++++++++++++++++++++++++++++")
                     print("Selling | Amount: %.4f | Price: %.4f" % (coinSell, self.price))
-                    if self.real == "y" and self.cryptoCoin > 0:
-                        res = self.wallet_binance.sell(self.market, coinSell, self.price)
-                        self.wallet_binance.cronoMacdString("Sell triggered Real | Amount: %.4f | Price: %.3f" % (coinSell, self.price))
-                    else:
-                        res = self.wallet_binance.sell(self.market, coinSell, self.price)
+                    res = self.wallet_binance.sell(self.market, coinSell, self.price)
 
                     if not isinstance(res, dict) or not res.get("filled"):
                         err = res.get("error") if isinstance(res, dict) else "risposta ordine assente"
@@ -77,43 +73,29 @@ class StopTrail:
                         return
 
                     fill_price = res.get("fill_price", self.price)
-
                     self.running = False
-
-                    self.wallet()  # aggiorna i saldi dopo la vendita
+                    self.wallet()
                     fee_t = res.get("fee", 0.0)
                     pnl_t = res.get("pnl", 0.0)
                     self.data_binance.cronoMacdString("SELL | Fill: %.3f | Stop loss: %.3f | pnl: %.2f | fee: %.4f | USDC: %.2f | %s: %.4f"
                                                       % (fill_price, self.stoploss, pnl_t, fee_t, self.stableCoin, self.cryptoName, self.cryptoCoin))
-
                     self.wallet_binance.write_ciclostart(self.priceMin)
-                    self.data_binance.cronoMacdString("pricemin : %.3f" % self.priceMin)
-
                     now = datetime.now(timezone.utc)
                     self.data_binance.cronoTradeMacd(now, "SELL", self.market, coinSell, fill_price)
-
                     print("Torno a MACD")
 
-        # buy------------------------------
+        # buy (apertura long) ------------------------------
         elif self.type == "buy":
             if (self.price + self.stopsize) < self.stoploss:
-                # Se il prezzo scende allora scende anche il trail
                 self.stoploss = self.price + self.stopsize
                 print("New low observed: Updating stop loss to %.4f" % self.stoploss)
-            # Se il prezzo aumenta e supera lo stoploss allora compro
             elif self.price >= self.stoploss:
                 self.wallet()
                 stableBuy = self.stableBot
                 amount = self.wallet_binance.usd_to_size(self.market, stableBuy, self.price)
-                if self.stoplossorder == "y":
-                    self.sellOrderStopLoss = True
-
                 print("++++++++++++++++++++++++++++++++++++++++++")
                 print("Buying | Amount: %.4f | Price: %.3f" % (amount, self.price))
-                if self.real == "y" and self.stableCoin > 10:
-                    res = self.wallet_binance.buy(self.market, amount, self.price)
-                else:
-                    res = self.wallet_binance.buy(self.market, amount, self.price)
+                res = self.wallet_binance.buy(self.market, amount, self.price)
 
                 if not isinstance(res, dict) or not res.get("filled"):
                     err = res.get("error") if isinstance(res, dict) else "risposta ordine assente"
@@ -122,26 +104,78 @@ class StopTrail:
                     return
 
                 fill_price = res.get("fill_price", self.price)
-
                 self.running = False
-
-                self.wallet()  # aggiorna i saldi (e priceMin via get_entry_price)
-
-                triggerPrice = round(fill_price - (self.stopsize * self.multiSize), 2)
-                amountOrder = self.wallet_binance.round_size(self.market, self.cryptoCoin)
-                if self.stoplossorder == "y":
-                    self.wallet_binance.crea_ordine_sell_stop(self.market, amountOrder, triggerPrice, triggerPrice)
-                    self.wallet_binance.cronoMacdString("Creo Ordine Sell Stop", self.market, amountOrder, triggerPrice, triggerPrice)
+                self.wallet()
                 fee_t = res.get("fee", 0.0)
                 self.wallet_binance.cronoMacdString("BUY | Fill: %.3f | Stop loss: %.3f | fee: %.4f | USDC: %.2f | %s: %.4f"
                                                     % (fill_price, self.stoploss, fee_t, self.stableCoin, self.cryptoName, self.cryptoCoin))
-
                 self.wallet_binance.write_ciclostart(self.priceMin)
-                self.wallet_binance.cronoMacdString("pricemin : %.3f" % self.priceMin)
-
                 now = datetime.now(timezone.utc)
                 self.wallet_binance.cronoTradeMacd(now, "BUY", self.market, amount, fill_price)
+                print("Torno a MACD")
 
+        # short (apertura short) ---------------------------
+        elif self.type == "short":
+            if (self.price - self.stopsize) > self.stoploss:
+                self.stoploss = self.price - self.stopsize
+                print("New high in short trail: Updating stop to %.4f" % self.stoploss)
+            elif self.price <= self.stoploss:
+                self.wallet()
+                stableShort = self.stableBot
+                amount = self.wallet_binance.usd_to_size(self.market, stableShort, self.price)
+                print("++++++++++++++++++++++++++++++++++++++++++")
+                print("Opening SHORT | Amount: %.4f | Price: %.3f" % (amount, self.price))
+                res = self.wallet_binance.open_short(self.market, amount, self.price)
+
+                if not isinstance(res, dict) or not res.get("filled"):
+                    err = res.get("error") if isinstance(res, dict) else "risposta ordine assente"
+                    print(f"SHORT NON ESEGUITO: {err}")
+                    self.wallet_binance.cronoMacdString(f"SHORT NON ESEGUITO: {err}")
+                    return
+
+                fill_price = res.get("fill_price", self.price)
+                self.running = False
+                self.wallet()
+                fee_t = res.get("fee", 0.0)
+                self.wallet_binance.cronoMacdString("SHORT | Fill: %.3f | Stop: %.3f | fee: %.4f | USDC: %.2f | %s: %.4f"
+                                                    % (fill_price, self.stoploss, fee_t, self.stableCoin, self.cryptoName, self.cryptoCoin))
+                self.wallet_binance.write_ciclostart(self.priceMin)
+                now = datetime.now(timezone.utc)
+                self.wallet_binance.cronoTradeMacd(now, "SHORT", self.market, amount, fill_price)
+                print("Torno a MACD")
+
+        # cover (chiusura short) ---------------------------
+        elif self.type == "cover":
+            if (self.price + self.stopsize) < self.stoploss:
+                self.stoploss = self.price + self.stopsize
+                print("New low in cover trail: Updating stop to %.4f" % self.stoploss)
+            elif self.price >= self.stoploss:
+                self.wallet()
+                coinCover = self.coinBot
+                if coinCover <= 0:
+                    self.running = False
+                    return
+
+                print("++++++++++++++++++++++++++++++++++++++++++")
+                print("Covering SHORT | Amount: %.4f | Price: %.4f" % (coinCover, self.price))
+                res = self.wallet_binance.close_short(self.market, coinCover, self.price)
+
+                if not isinstance(res, dict) or not res.get("filled"):
+                    err = res.get("error") if isinstance(res, dict) else "risposta ordine assente"
+                    print(f"COVER NON ESEGUITO: {err}")
+                    self.wallet_binance.cronoMacdString(f"COVER NON ESEGUITO: {err}")
+                    return
+
+                fill_price = res.get("fill_price", self.price)
+                self.running = False
+                self.wallet()
+                fee_t = res.get("fee", 0.0)
+                pnl_t = res.get("pnl", 0.0)
+                self.data_binance.cronoMacdString("COVER | Fill: %.3f | Stop: %.3f | pnl: %.2f | fee: %.4f | USDC: %.2f | %s: %.4f"
+                                                  % (fill_price, self.stoploss, pnl_t, fee_t, self.stableCoin, self.cryptoName, self.cryptoCoin))
+                self.wallet_binance.write_ciclostart(self.priceMin)
+                now = datetime.now(timezone.utc)
+                self.data_binance.cronoTradeMacd(now, "COVER", self.market, coinCover, fill_price)
                 print("Torno a MACD")
 
     # PRINT************************************************************************
@@ -169,23 +203,23 @@ class StopTrail:
         self.start_time = time.time()
         while self.running:
             try:
-                if self.type == "buy":
+                if self.type in ("buy", "short"):
                     elapsed = time.time() - self.start_time
                     if self.max_duration > 0 and elapsed > self.max_duration:
                         print("++++++++++++++++++++++++++++++++++++++++++")
                         print(
-                            "TRAIL BUY ANNULLATO: timeout %.0fs superato. Segnale MACD scaduto."
-                            % self.max_duration
+                            "TRAIL %s ANNULLATO: timeout %.0fs superato. Segnale MACD scaduto."
+                            % (self.type.upper(), self.max_duration)
                         )
                         self.wallet_binance.cronoMacdString(
-                            "TRAIL BUY ANNULLATO per timeout (%.0fs) | Prezzo: %.4f"
-                            % (self.max_duration, self.price)
+                            "TRAIL %s ANNULLATO per timeout (%.0fs) | Prezzo: %.4f"
+                            % (self.type.upper(), self.max_duration, self.price)
                         )
                         self.running = False
                         break
 
                     max_drop = self.stopsize * self.max_drop_mult
-                    if self.initial_price > 0 and (self.initial_price - self.price) > max_drop:
+                    if self.type == "buy" and self.initial_price > 0 and (self.initial_price - self.price) > max_drop:
                         print("++++++++++++++++++++++++++++++++++++++++++")
                         print(
                             "TRAIL BUY ANNULLATO: prezzo sceso oltre soglia (%.4f -> %.4f, drop -$%.4f > soglia $%.4f). Breakdown in corso."
@@ -194,6 +228,19 @@ class StopTrail:
                         self.wallet_binance.cronoMacdString(
                             "TRAIL BUY ANNULLATO per drop eccessivo | Inizio: %.4f | Attuale: %.4f | Drop: -$%.4f"
                             % (self.initial_price, self.price, self.initial_price - self.price)
+                        )
+                        self.running = False
+                        break
+
+                    if self.type == "short" and self.initial_price > 0 and (self.price - self.initial_price) > max_drop:
+                        print("++++++++++++++++++++++++++++++++++++++++++")
+                        print(
+                            "TRAIL SHORT ANNULLATO: prezzo salito oltre soglia (%.4f -> %.4f, spike +$%.4f > soglia $%.4f). Breakout rialzista in corso."
+                            % (self.initial_price, self.price, self.price - self.initial_price, max_drop)
+                        )
+                        self.wallet_binance.cronoMacdString(
+                            "TRAIL SHORT ANNULLATO per spike eccessivo | Inizio: %.4f | Attuale: %.4f | Spike: +$%.4f"
+                            % (self.initial_price, self.price, self.price - self.initial_price)
                         )
                         self.running = False
                         break

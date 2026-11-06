@@ -224,8 +224,31 @@ class Hyperliquid:
         for ap in state.get("assetPositions", []):
             pos = ap.get("position", {})
             if pos.get("coin") == coin:
-                return float(pos.get("szi", 0.0))
+                return abs(float(pos.get("szi", 0.0)))
         return 0.0
+
+    def get_position_side(self, market=None):
+        """Ritorna 'LONG', 'SHORT' o 'FLAT'."""
+        coin = self._coin(market or self.market)
+        if self.exchange:
+            address = self.account_address or self.exchange.wallet.address
+            try:
+                state = self.info.user_state(address)
+                for ap in state.get("assetPositions", []):
+                    pos = ap.get("position", {})
+                    if pos.get("coin") == coin:
+                        szi = float(pos.get("szi", 0.0))
+                        if szi > 0:
+                            return "LONG"
+                        elif szi < 0:
+                            return "SHORT"
+                        return "FLAT"
+            except Exception:
+                return "FLAT"
+        d = self._load_paper()
+        if float(d.get("sz", 0.0)) <= 1e-5:
+            return "FLAT"
+        return d.get("side", "LONG")
 
     def get_balance_order(self, coin):
         """Cripto bloccata dagli ordini aperti. I trigger SL non bloccano la
@@ -284,11 +307,7 @@ class Hyperliquid:
             "cash_usd": config.START_BALANCE_USD,
             "sz": 0.0,
             "entry_px": 0.0,
-            # FIX: distingue un entry_px "vero" (da un buy eseguito dal bot,
-            # su cui ha senso far dipendere il gate BUY/SELL) da un entry_px
-            # "marcato a mercato" all'avvio (solo per evitare un PnL fantasma
-            # sul saldo iniziale gratuito di walletIniziale.txt, MAI un
-            # criterio di trading valido). Vedi get_entry_price() sotto.
+            "side": "FLAT",
             "entry_is_real": False,
             "realized_pnl_usd": 0.0,
             "fees_usd": 0.0,
@@ -479,13 +498,11 @@ class Hyperliquid:
             else:
                 d["entry_px"] = price
             d["entry_is_real"] = True
+            d["side"] = "LONG"
             d["sz"] = old_sz + sz
             d["fees_usd"] = float(d["fees_usd"]) + fee
             self._save_paper(d)
             self.cronoMacdString("PAPER BUY", coin, "sz", sz, "@", price, "fee", round(fee, 4))
-            # FIX: "filled": True esplicito anche sul ramo paper, cosi'
-            # trailMacd.py controlla lo stesso campo indipendentemente da
-            # paper/reale invece di assumere sempre l'esecuzione.
             return {"paper": True, "filled": True, "error": None, "coin": coin, "sz": sz, "fill_price": price, "fee": fee}
         except Exception as e:
             print("Errore BUY Hyperliquid:", e)
@@ -511,11 +528,12 @@ class Hyperliquid:
             fee = sz * price * config.FEE_PCT
             realized = (price - float(d["entry_px"])) * sz - fee
             d["cash_usd"] = float(d["cash_usd"]) + sz * price - fee
-            d["sz"] = pos - sz
-            if d["sz"] <= 0:
+            d["sz"] = round(max(0.0, pos - sz), 6)
+            if d["sz"] <= 1e-5:
                 d["sz"] = 0.0
                 d["entry_px"] = 0.0
                 d["entry_is_real"] = False
+                d["side"] = "FLAT"
             d["realized_pnl_usd"] = float(d["realized_pnl_usd"]) + realized
             d["fees_usd"] = float(d["fees_usd"]) + fee
             d["n_trades"] = int(d["n_trades"]) + 1
@@ -526,6 +544,77 @@ class Hyperliquid:
         except Exception as e:
             print("Errore SELL Hyperliquid:", e)
             self.cronoMacdString("SELL ERRORE", coin, str(e))
+            return {"filled": False, "status": "error", "error": str(e), "fill_price": price}
+
+    def open_short(self, market, amount, price):
+        """APRE (o aggiunge a) una posizione SHORT.
+        Reale: market_open(is_buy=False) dopo set_leverage.
+        Paper: cash -= fee, posizione short += size, pnl calcolato su discesa."""
+        coin = self._coin(market)
+        sz = self.round_size(coin, amount)
+        try:
+            if self.exchange:
+                self._ensure_leverage(coin)
+                result = self.exchange.market_open(name=coin, is_buy=False, sz=sz, slippage=0.005)
+                norm = self._normalize_order_result(result, self.price if hasattr(self, "price") else price)
+                esito = "FILLED" if norm["filled"] else f"NON ESEGUITO ({norm.get('error')})"
+                self.cronoMacdString("SHORT reale", coin, sz, norm.get("status", "?"), esito)
+                return norm
+            d = self._load_paper()
+            fee = sz * price * config.FEE_PCT
+            old_sz = float(d["sz"])
+            if old_sz > 0 and d.get("side") == "SHORT" and d.get("entry_is_real", True):
+                d["entry_px"] = ((float(d["entry_px"]) * old_sz) + (price * sz)) / (old_sz + sz)
+            else:
+                d["entry_px"] = price
+            d["entry_is_real"] = True
+            d["side"] = "SHORT"
+            d["sz"] = old_sz + sz
+            d["cash_usd"] = float(d["cash_usd"]) - fee
+            d["fees_usd"] = float(d["fees_usd"]) + fee
+            self._save_paper(d)
+            self.cronoMacdString("PAPER SHORT", coin, "sz", sz, "@", price, "fee", round(fee, 4))
+            return {"paper": True, "filled": True, "error": None, "coin": coin, "sz": sz, "fill_price": price, "fee": fee}
+        except Exception as e:
+            print("Errore SHORT Hyperliquid:", e)
+            self.cronoMacdString("SHORT ERRORE", coin, str(e))
+            return {"filled": False, "status": "error", "error": str(e), "fill_price": price}
+
+    def close_short(self, market, amount, price):
+        """CHIUDE la posizione SHORT (ricopertura / Buy to close).
+        Reale: market_close (reduce_only).
+        Paper: pnl = (entry - price)*sz - fee, aggiunge pnl al cash."""
+        coin = self._coin(market)
+        sz = self.round_size(coin, amount)
+        try:
+            if self.exchange:
+                result = self.exchange.market_close(coin=coin, sz=sz, slippage=0.005)
+                norm = self._normalize_order_result(result, self.price if hasattr(self, "price") else price)
+                esito = "FILLED" if norm["filled"] else f"NON ESEGUITO ({norm.get('error')})"
+                self.cronoMacdString("COVER SHORT reale", coin, sz, norm.get("status", "?"), esito)
+                return norm
+            d = self._load_paper()
+            pos = float(d["sz"])
+            sz = min(sz, pos)
+            fee = sz * price * config.FEE_PCT
+            realized = (float(d["entry_px"]) - price) * sz - fee
+            d["cash_usd"] = float(d["cash_usd"]) + realized
+            d["sz"] = round(max(0.0, pos - sz), 6)
+            if d["sz"] <= 1e-5:
+                d["sz"] = 0.0
+                d["entry_px"] = 0.0
+                d["entry_is_real"] = False
+                d["side"] = "FLAT"
+            d["realized_pnl_usd"] = float(d["realized_pnl_usd"]) + realized
+            d["fees_usd"] = float(d["fees_usd"]) + fee
+            d["n_trades"] = int(d["n_trades"]) + 1
+            self._save_paper(d)
+            self.cronoMacdString("PAPER COVER SHORT", coin, "sz", sz, "@", price,
+                                 "pnl", round(realized, 4), "fee", round(fee, 4))
+            return {"paper": True, "filled": True, "error": None, "coin": coin, "sz": sz, "fill_price": price, "fee": fee, "pnl": realized}
+        except Exception as e:
+            print("Errore COVER SHORT Hyperliquid:", e)
+            self.cronoMacdString("COVER SHORT ERRORE", coin, str(e))
             return {"filled": False, "status": "error", "error": str(e), "fill_price": price}
 
     def crea_ordine_sell_stop(self, market, amount, stop_price, limit_price):
