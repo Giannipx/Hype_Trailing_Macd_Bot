@@ -78,6 +78,49 @@ class Hyperliquid:
         """Nome interno del perpetual: 'SOL/USDC' o 'SOL/USDT' -> 'SOL'."""
         return market.split("/")[0].strip()
 
+    def _coin_clean(self):
+        """Nome della coin in minuscolo (es. 'hype', 'sol')."""
+        if not self.market:
+            return ""
+        return self._coin(self.market).strip().lower()
+
+    def _get_paper_file(self):
+        c = self._coin_clean()
+        if c:
+            f = f"paper_wallet_{c}.json"
+            if not os.path.exists(f) and c == "hype" and os.path.exists(PAPER_WALLET_FILE):
+                return PAPER_WALLET_FILE
+            return f
+        return PAPER_WALLET_FILE
+
+    def _get_ciclostart_file(self):
+        c = self._coin_clean()
+        if c:
+            f = f"fileCicloStart_{c}.txt"
+            if not os.path.exists(f) and c == "hype" and os.path.exists("fileCicloStart.txt"):
+                return "fileCicloStart.txt"
+            return f
+        return "fileCicloStart.txt"
+
+    def _get_bot_state_file(self):
+        c = self._coin_clean()
+        if c:
+            f = f"bot_state_{c}.json"
+            if not os.path.exists(f) and c == "hype" and os.path.exists("bot_state.json"):
+                return "bot_state.json"
+            return f
+        return "bot_state.json"
+
+    def _get_crono_file(self):
+        c = self._coin_clean()
+        if c and c != "hype":
+            return f"cronoMacd_{c}.txt"
+        if c == "hype":
+            if os.path.exists("cronoMacd_hype.txt"):
+                return "cronoMacd_hype.txt"
+            return config.CRONO_FILE
+        return config.CRONO_FILE
+
     def round_size(self, coin, sz):
         """Arrotonda la size allo szDecimals del perpetual."""
         try:
@@ -314,7 +357,7 @@ class Hyperliquid:
             d["entry_time"] = entry_time
             self._save_paper(d)
         else:
-            state_file = "bot_state.json"
+            state_file = self._get_bot_state_file()
             tmp = state_file + ".tmp"
             with open(tmp, "w") as f:
                 json.dump({"take_profit_hit": bool(take_profit_hit), "entry_time": entry_time}, f)
@@ -325,7 +368,7 @@ class Hyperliquid:
         if not self.exchange:
             d = self._load_paper()
             return bool(d.get("take_profit_hit", False)), d.get("entry_time", None)
-        state_file = "bot_state.json"
+        state_file = self._get_bot_state_file()
         if os.path.exists(state_file):
             try:
                 with open(state_file) as f:
@@ -372,11 +415,12 @@ class Hyperliquid:
         return d
 
     def _load_paper(self):
-        if not os.path.exists(PAPER_WALLET_FILE):
+        target = self._get_paper_file()
+        if not os.path.exists(target):
             # primo avvio: il wallet paper parte dai valori di walletIniziale.txt
             return self._init_paper()
         try:
-            with open(PAPER_WALLET_FILE, "r") as f:
+            with open(target, "r") as f:
                 return json.load(f)
         except Exception:
             # file corrotto o vuoto (es. crash): ricrea da walletIniziale.txt
@@ -384,14 +428,15 @@ class Hyperliquid:
 
     def _save_paper(self, d):
         # FIX: scrittura non atomica. Un crash/kill a metà "json.dump" lasciava
-        # paper_wallet.json corrotto, e _load_paper() in quel caso richiamava
+        # paper_wallet corrotto, e _load_paper() in quel caso richiamava
         # silenziosamente _init_paper(), azzerando PnL/trade simulati senza
         # nessun avviso visibile. Ora si scrive su file temporaneo e si fa
         # replace atomico solo a scrittura completata.
-        tmp_path = PAPER_WALLET_FILE + ".tmp"
+        target = self._get_paper_file()
+        tmp_path = target + ".tmp"
         with open(tmp_path, "w") as f:
             json.dump(d, f, indent=2)
-        os.replace(tmp_path, PAPER_WALLET_FILE)
+        os.replace(tmp_path, target)
 
     def read_wallet_iniziale(self):
         """Quantità iniziali dei token da walletIniziale.txt (riferimento)."""
@@ -430,18 +475,25 @@ class Hyperliquid:
         return float(d["cash_usd"]) if pr == 0 else float(d["sz"])
 
     def read_ciclostart(self, cc):
-        with open("fileCicloStart.txt", "r") as file:
-            return float(file.readlines()[cc].strip())
+        fpath = self._get_ciclostart_file()
+        if not os.path.exists(fpath):
+            return 0.0
+        with open(fpath, "r") as file:
+            lines = file.readlines()
+            if not lines or cc >= len(lines):
+                return 0.0
+            return float(lines[cc].strip())
 
     def write_ciclostart(self, pMin):
         # FIX: stessa scrittura non atomica di _save_paper. fileCicloStart.txt
         # governa il gate "vendo solo sopra il prezzo medio d'acquisto": se
         # viene letto a metà scrittura (o troncato da un crash), read_ciclostart
         # può sollevare un IndexError su file vuoto e far cadere il bot.
-        tmp_path = "fileCicloStart.txt.tmp"
+        fpath = self._get_ciclostart_file()
+        tmp_path = fpath + ".tmp"
         with open(tmp_path, "w") as f:
             f.write(str(pMin))
-        os.replace(tmp_path, "fileCicloStart.txt")
+        os.replace(tmp_path, fpath)
         self.cronoMacdString("Write Ciclostart", pMin)
 
     # ---- ordini (perp: market_open long / market_close) ----
@@ -762,18 +814,21 @@ class Hyperliquid:
 
     # ---- cronologia ----
     def cronoMacd(self, datax, histogramx, macdx, signalx, trendx, rsix, type):
-        with open(config.CRONO_FILE, "a+") as fx:
+        fname = self._get_crono_file()
+        with open(fname, "a+") as fx:
             fx.write("UTC  %s | Histo: %2f | Macd: %2f | Signal: %2f | Trend: %s | Rsi: %s | Tipo: %s\n"
                      % (datax, histogramx, macdx, signalx, trendx, rsix, type))
 
     def cronoTradeMacd(self, timex, tipo, pair, qty, priced):
-        with open(config.CRONO_FILE, "a+") as fx:
+        fname = self._get_crono_file()
+        with open(fname, "a+") as fx:
             fx.write("UTC  %s | %s | %s | Qty %.4f | Prezzo %.3f\n"
                      % (timex.strftime("%Y-%m-%d %H:%M:%S"), tipo, pair, float(qty), float(priced)))
 
     def cronoMacdString(self, *args):
         try:
-            with open(config.CRONO_FILE, "a") as f:
+            fname = self._get_crono_file()
+            with open(fname, "a") as f:
                 # FIX: prima datetime.now() (ora locale del sistema, naive),
                 # mentre le candele Hyperliquid sono in epoch ms UTC. Log
                 # disallineati rispetto ai dati OHLCV rendono più difficile

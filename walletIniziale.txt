@@ -2,3 +2,4 @@ USDC: 1000
 BTC: 0.0
 HYPE: 0.0
 ETH: 0.0
+SOL: 0.0

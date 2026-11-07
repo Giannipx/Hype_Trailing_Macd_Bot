@@ -11,7 +11,16 @@ import argparse
 import bisect
 import csv
 import os
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+# Assicura che la directory root del progetto sia in sys.path
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+BACKTEST_DIR = Path(__file__).resolve().parent
 
 import config
 import indicators
@@ -23,7 +32,7 @@ RSI_PERIOD = 14
 SMA1_PERIOD = 20
 SMA2_PERIOD = 50
 TREND_TIMEFRAME = "15m"
-OUTPUT_DIR = "backtest_output"
+OUTPUT_DIR = str(BACKTEST_DIR / "output")
 
 TF_SECONDS = {
     "1m": 60,
@@ -824,9 +833,22 @@ def save_trades_csv(path, trades):
 # ==================================================================
 # MAIN
 # ==================================================================
+def resolve_param_path(path):
+    if os.path.exists(path):
+        return path
+    root_candidate = ROOT_DIR / path
+    if root_candidate.exists():
+        return str(root_candidate)
+    params_candidate = BACKTEST_DIR / "params" / path
+    if params_candidate.exists():
+        return str(params_candidate)
+    return path
+
+
 def load_params(path):
+    resolved = resolve_param_path(path)
     params = {}
-    with open(path) as f:
+    with open(resolved) as f:
         for line in f:
             line = line.strip()
             if not line or "=" not in line:

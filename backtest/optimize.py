@@ -2,9 +2,17 @@ import argparse
 from datetime import datetime, timezone, timedelta
 import os
 import sys
+from pathlib import Path
 
-# Assicuriamoci che python trovi i moduli
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# Assicura che la directory root del progetto sia in sys.path
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+# Cartella corrente per import di backtest.py
+BACKTEST_DIR = Path(__file__).resolve().parent
+if str(BACKTEST_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKTEST_DIR))
 
 from hl import Hyperliquid
 from backtest import run_backtest, resolve_trend_tf, TF_SECONDS

@@ -610,5 +610,82 @@ In seguito all'analisi dettagliata condotta sulla codebase aggregata (`HYPE_BOT_
   - **30 giorni**: Win Rate **83.3%** (10 vittorie su 12 uscite), Rendimento netto **+0.68%**, Max Drawdown **0.44%**.
   - **60 giorni**: Win Rate **78.9%** (15 vittorie su 19 uscite), Rendimento netto **+0.35%**, Max Drawdown **0.94%**.
 
+---
+
+## 15. Undicesimo giro: Scaling Allocazione Capitale e Architettura Dual-Bot (HYPE + SOL)
+
+### 15.1 — Scaling Capitale e Rischio (`PERC_STABLE=0.35`, `MAX_LOSS_PCT=0.015`)
+- **File:** `hype.txt`, `hyper_sol.txt`
+- **Razionale:** Con i parametri conservativi iniziali (`PERC_STABLE=0.15`), il bot investiva solo il 15% del capitale per trade. Grazie all'alto Win Rate riscontrato sui trend puliti a 1h/4h di HYPE e SOL (rispettivamente 83.3% e 57.1% a 30 giorni) e al rischio strettamente controllato dal Take Profit parziale con Break-Even e Hard Stop dinamico, l'allocazione è stata scalata a `PERC_STABLE=0.35` (35% di capitale per bot) con `MAX_LOSS_PCT=0.015` (1.5% stop floor).
+- **Rendimento Combinato e Rischio:**
+  - HYPE (30gg): da +0.68% a **+1.55%** (Max Drawdown 1.02%, Win Rate 83.3%).
+  - SOL (30gg): da +0.55% a **+1.28%** (Max Drawdown 1.12%, Win Rate 57.1%).
+  - Rendimento mensile complessivo stimato del Dual-Bot: **~+2.83%** su collaterale combinato, con leva 1x senza rischio liquidazione e max drawdown < 1.95% a 60gg.
+
+### 15.2 — Disaccoppiamento dello Stato per Esecuzione Parallela Multi-Bot
+- **File:** `hl.py`
+- **Problema:** Precedentemente, `hl.py` utilizzava nomi di file fissi e globali per il wallet paper (`paper_wallet.json`), il prezzo medio d'acquisto (`fileCicloStart.txt`), lo stato di riavvio (`bot_state.json`) e il log (`cronoMacd.txt`). Avviando due istanze del bot in contemporanea (es. HYPE e SOL), i processi entravano in collisione sovrascrivendo i rispettivi file di stato.
+- **Fix:** Implementato il namespacing dinamico dei file di runtime basato sul simbolo dell'asset (`_coin_clean()`):
+  - Wallet paper: `paper_wallet_{coin}.json` (es. `paper_wallet_sol.json`, mantenendo il fallback a `paper_wallet.json` per HYPE per piena retrocompatibilità).
+  - Ciclo start: `fileCicloStart_{coin}.txt` (es. `fileCicloStart_sol.txt`, con fallback per HYPE).
+  - Stato di riavvio: `bot_state_{coin}.json` (es. `bot_state_hype.json`, `bot_state_sol.json`).
+  - Cronologia / Log: `cronoMacd_{coin}.txt` (es. `cronoMacd_sol.txt`, mantenendo `cronoMacd.txt` per HYPE).
+  - In `botMacd.py`: il reset all'avvio della cronologia agisce solo sul file dedicato all'asset in esecuzione.
+
+### 15.3 — Supporto Dinamico Multi-Asset in `dashboard.py`
+- **File:** `dashboard.py`
+- **Modifiche:**
+  - Rileva dinamicamente il nome dell'asset e punta ai rispettivi file namespaced (`hl._get_paper_file()`, `hl._get_crono_file()`, ecc.).
+  - Sostituite tutte le etichette, titoli di finestra e metriche precedentemente fisse su "HYPE" con il simbolo dell'asset attivo.
+  - È possibile visualizzare in tempo reale ciascun bot passando il relativo file parametri:
+    `streamlit run dashboard.py -- --file hype.txt`
+    `streamlit run dashboard.py -- --file hyper_sol.txt`
+
+### 15.4 — Aggiornamento `export_bundle.py` e `walletIniziale.txt`
+- **File:** `export_bundle.py`, `walletIniziale.txt`
+- **Modifiche:**
+  - Aggiunto `SOL: 0.0` in `walletIniziale.txt` per consentire una partenza pulita del paper wallet di SOL.
+  - Aggiornato `export_bundle.py` per escludere automaticamente dall'esportazione tutti i file runtime con prefissi dinamici (`paper_wallet*`, `fileCicloStart*`, `bot_state*`, `cronoMacd*`, `*.tmp`).
+
+---
+
+## 16. Dodicesimo giro: Riorganizzazione Modulare dei File di Progetto
+
+### 16.1 — Struttura della Cartella Root
+- **Razionale:** Mantenere la root pulita e focalizzata esclusivamente sull'operatività del trading bot, eliminando dispersione tra script di backtest, tool di esportazione, documentazione e file di test.
+- **File mantenuti nella Root:**
+  - `jbmainMacd.py`, `botMacd.py`, `trailMacd.py`, `hl.py`, `indicators.py`, `config.py`, `dashboard.py`.
+  - Configurazioni attive: `hype.txt`, `hyper_sol.txt`, `walletIniziale.txt`.
+  - Configurazione ambiente e git: `requirements.txt`, `.env.example`, `.gitignore`, `AGENTS.md`.
+
+### 16.2 — Cartella `backtest/` (Motore di Simulazione & Ottimizzazione)
+- **File spostati:**
+  - `backtest.py` -> `backtest/backtest.py`
+  - `optimize.py` -> `backtest/optimize.py`
+  - `risultati.txt` -> `backtest/risultati.txt`
+  - `backtest_output/` -> `backtest/output/`
+  - Parametri di test storici -> `backtest/params/` (`hyper_pendle.txt`, `hyper_sui.txt`, `hyper_tao.txt`, `hyper_wif.txt`).
+- **Adattamento del Codice:**
+  - `backtest.py` e `optimize.py` aggiungono dinamicamente la root a `sys.path`.
+  - Aggiunto `resolve_param_path(path)` che trova i file `.txt` sia nella root (`hype.txt`), sia nella cartella `params/`, sia da percorsi relativi/assoluti, indipendentemente dalla directory di lavoro da cui viene lanciato il comando.
+  - Gli output CSV (`trades_*.csv` e `summary_*.csv`) vengono salvati ordinatamente in `backtest/output/`.
+
+### 16.3 — Cartella `export/` (Tooling di Esportazione per AI Esterne)
+- **File spostati:**
+  - `export_bundle.py` -> `export/export_bundle.py`
+  - `HYPE_BOT_BUNDLE.txt` -> `export/HYPE_BOT_BUNDLE.txt`
+  - `HYPE_BOT_CODE.zip` -> `export/HYPE_BOT_CODE.zip`
+- **Adattamento del Codice:**
+  - `export_bundle.py` scansiona la root del progetto ed esporta bundle e ZIP direttamente nella cartella `export/`, escludendo ricorsivamente la cartella `export/` stessa e gli output dei backtest.
+
+### 16.4 — Cartella `docs/` (Documentazione di Progetto)
+- **File spostati:**
+  - `README.md` -> `docs/README.md`
+  - `CLAUDE.md` -> `docs/CLAUDE.md`
+- **Contenuto:** Manuale completo d'uso, istruzioni Dual-Bot, architettura e changelog dettagliato dei 16 giri di sviluppo.
+
+
+
+
 
 

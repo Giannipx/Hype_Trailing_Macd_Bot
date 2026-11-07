@@ -2,14 +2,21 @@ __pycache__/
 *.pyc
 .env
 
-# stato runtime del paper trading (i file .txt runtime sono solo valori
-# simulati e vengono committati; paper_wallet.json resta locale)
-paper_wallet.json
-GPT.md
-cronoMacd.txt
-fileCicloStart.txt
-GPT2.md
-backtest_result.md
-backtest_output
+# Stato runtime locale (paper trading & log)
+paper_wallet*.json
+paper_wallet*.tmp
+cronoMacd*.txt
+fileCicloStart*.tmp
+bot_state*.json
+bot_state*.tmp
+
+# Output di backtest e bundle esportati
+backtest_output/
+backtest/output/
+export/HYPE_BOT_BUNDLE.txt
+export/HYPE_BOT_CODE.zip
 HYPE_BOT_BUNDLE.txt
 HYPE_BOT_CODE.zip
+GPT.md
+GPT2.md
+backtest_result.md

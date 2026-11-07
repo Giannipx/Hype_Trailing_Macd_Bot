@@ -250,9 +250,18 @@ class StopTrail:
                 self.print_status()
                 self.update_stop()
             except Exception as e:
-                print(f"Errore nel trail ({self.type}): {e}")
+                err_str = str(e)
+                if "502" in err_str or "Bad Gateway" in err_str or "<html" in err_str:
+                    clean_err = "Hyperliquid API 502 Bad Gateway (temporaneo, riprovo...)"
+                elif "503" in err_str or "504" in err_str or "Gateway Time" in err_str:
+                    clean_err = "Hyperliquid API 503/504 Timeout (temporaneo, riprovo...)"
+                elif "ConnectionError" in err_str or "RemoteDisconnected" in err_str:
+                    clean_err = "Disconnessione rete Hyperliquid (riprovo...)"
+                else:
+                    clean_err = err_str[:120]
+                print(f"Errore nel trail ({self.type}): {clean_err}")
                 try:
-                    self.data_binance.cronoMacdString(f"ERRORE trail {self.type}: {e}")
+                    self.data_binance.cronoMacdString(f"ERRORE trail {self.type}: {clean_err}")
                 except Exception:
                     pass
             time.sleep(self.interval)

@@ -185,17 +185,17 @@ class CryptoBot:
         if ans.strip().lower() == "y":
             self.wallet_binance.reset_balance()
 
+        crono_f = getattr(self.wallet_binance, "_get_crono_file", lambda: config.CRONO_FILE)()
         try:
             ans = input(
-                "Vuoi resettare anche la cronologia "
-                "(cronoMacd.txt)? [y/N]: "
+                f"Vuoi resettare anche la cronologia ({crono_f})? [y/N]: "
             )
         except EOFError:
             ans = ""
         if ans.strip().lower() == "y":
-            with open(config.CRONO_FILE, "w"):
+            with open(crono_f, "w"):
                 pass
-            print("Cronologia paper resettata: %s" % config.CRONO_FILE)
+            print(f"Cronologia paper resettata: {crono_f}")
 
     # ==========================================================
     # BANNER
@@ -1161,15 +1161,23 @@ class CryptoBot:
                 self.wallet()
 
             except Exception as e:
+                err_str = str(e)
+                if "502" in err_str or "Bad Gateway" in err_str or "<html" in err_str:
+                    clean_err = "Hyperliquid API 502 Bad Gateway (temporaneo, riprovo...)"
+                elif "503" in err_str or "504" in err_str or "Gateway Time" in err_str:
+                    clean_err = "Hyperliquid API 503/504 Timeout (temporaneo, riprovo...)"
+                elif "ConnectionError" in err_str or "RemoteDisconnected" in err_str:
+                    clean_err = "Disconnessione rete Hyperliquid (riprovo...)"
+                else:
+                    clean_err = err_str[:120]
                 print(
-                    "Errore nel ciclo principale "
-                    "(rete/API/indicatori): %s"
-                    % e
+                    "Errore nel ciclo principale (rete/API): %s"
+                    % clean_err
                 )
                 try:
                     self.data_binance.cronoMacdString(
                         "ERRORE ciclo principale: %s"
-                        % e
+                        % clean_err
                     )
                 except Exception:
                     pass

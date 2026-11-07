@@ -62,17 +62,17 @@ def read_token_file(path):
     return tokens
 
 
-def read_paper_wallet():
-    if not os.path.exists("paper_wallet.json"):
+def read_paper_wallet(fpath="paper_wallet.json"):
+    if not os.path.exists(fpath):
         return {}
-    with open("paper_wallet.json") as f:
+    with open(fpath) as f:
         return json.load(f)
 
 
-def read_ciclostart():
-    if not os.path.exists("fileCicloStart.txt"):
+def read_ciclostart(fpath="fileCicloStart.txt"):
+    if not os.path.exists(fpath):
         return 0.0
-    with open("fileCicloStart.txt") as f:
+    with open(fpath) as f:
         line = f.readline().strip()
     try:
         return float(line)
@@ -96,7 +96,11 @@ def fmt_usd(v):
     return "%.2f" % v if v is not None else "-"
 
 
-st.set_page_config(page_title="HYPE Trailing MACD Bot - Dashboard", layout="wide")
+args = parse_args()
+params = load_params(args.file)
+symbol = params.get("SYMBOL", "HYPE") if params else "HYPE"
+
+st.set_page_config(page_title="%s Trailing MACD Bot - Dashboard" % symbol, layout="wide")
 
 # font più compatti per le metriche (utile su schermi piccoli)
 st.markdown("""
@@ -112,13 +116,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-args = parse_args()
-params = load_params(args.file)
 if not params:
     st.error("Parametri non trovati nel file '%s'. Avvio: streamlit run dashboard.py -- --file hype.txt" % args.file)
     st.stop()
 
-symbol = params.get("SYMBOL", "HYPE")
 timeframe = params.get("TIMEFRAME", "15m")
 real = params.get("REAL", "n")
 rete = "MAINNET" if config.NETWORK == "mainnet" else "TESTNET"
@@ -130,6 +131,11 @@ except Exception as e:
     st.error("Errore inizializzazione Hyperliquid: %s" % e)
     st.stop()
 
+coin = hl._coin(symbol)
+paper_file = hl._get_paper_file()
+ciclostart_file = hl._get_ciclostart_file()
+crono_file = hl._get_crono_file()
+
 init = read_token_file("walletIniziale.txt")
 if real == "y":
     cash_usd = hl.get_balance("USDC")
@@ -138,7 +144,7 @@ if real == "y":
     side = hl.get_position_side(symbol)
     bal = {}
 else:
-    bal = read_paper_wallet()
+    bal = read_paper_wallet(paper_file)
     cash_usd = float(bal.get("cash_usd", 0.0))
     sz_pos = float(bal.get("sz", 0.0))
     price_min = float(bal.get("entry_px", 0.0))
@@ -236,12 +242,12 @@ if refresh_secs > 0:
 # ============================================================
 # HEADER
 # ============================================================
-st.title("HYPE Trailing MACD Bot - Dashboard")
+st.title("%s Trailing MACD Bot - Dashboard" % coin)
 st.caption("%s | %s | Coin: %s | Timeframe: %s" % (modalita, rete, symbol, timeframe))
 
 # ---------- riga metriche principali ----------
 c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
-c1.metric("Prezzo HYPE", fmt_price(price))
+c1.metric("Prezzo %s" % coin, fmt_price(price))
 c2.metric("Capitale Paper (USD)" if real != "y" else "Equity Conto (USD)", fmt_usd(equity))
 c3.metric("USDC", fmt_usd(stable_coin))
 c4.metric("Posizione (%s)" % side, "%g %s" % (crypto_coin, symbol))
@@ -256,7 +262,7 @@ tab_wallet, tab_prezzo, tab_log = st.tabs(["Wallet e saldi", "Prezzo e indicator
 # TAB 1 - WALLET E SALDI
 # ============================================================
 with tab_wallet:
-    st.subheader("Saldo attuale (%s)" % ("Hyperliquid Reale" if real == "y" else "paper_wallet.json"))
+    st.subheader("Saldo attuale (%s)" % ("Hyperliquid Reale" if real == "y" else os.path.basename(paper_file)))
     st.dataframe(pd.DataFrame(token_rows), hide_index=True)
     st.caption("Valore USD calcolato a prezzo live di mercato.")
 
@@ -265,10 +271,10 @@ with tab_wallet:
         st.subheader("Wallet iniziale (walletIniziale.txt)")
         st.dataframe(pd.DataFrame(list(init.items()), columns=["Token", "Quantità"]), hide_index=True)
     with col_b:
-        st.subheader("Dettagli wallet paper (paper_wallet.json)")
+        st.subheader("Dettagli wallet paper (%s)" % os.path.basename(paper_file))
         paper_rows = [
             {"Campo": "Cash USDC", "Valore": fmt_usd(bal.get("cash_usd"))},
-            {"Campo": "Posizione HYPE", "Valore": "%g" % bal.get("sz", 0.0)},
+            {"Campo": "Posizione %s" % coin, "Valore": "%g" % bal.get("sz", 0.0)},
             {"Campo": "Prezzo medio entry", "Valore": fmt_price(price_min)},
             {"Campo": "PnL realizzato", "Valore": fmt_usd(bal.get("realized_pnl_usd"))},
             {"Campo": "Fee totali", "Valore": fmt_usd(bal.get("fees_usd"))},
@@ -297,7 +303,7 @@ with tab_prezzo:
         st.warning("Nessun dato candele disponibile.")
     else:
         idx = pd.to_datetime([c[0] for c in ohlcv], unit="ms")
-        st.subheader("Prezzo HYPE (%s)" % timeframe)
+        st.subheader("Prezzo %s (%s)" % (coin, timeframe))
         st.line_chart(pd.DataFrame(closes, index=idx, columns=["Close"]))
 
         st.subheader("MACD / Signal / Histogram")
@@ -323,8 +329,8 @@ with tab_prezzo:
 # TAB 3 - ATTIVITA' (LOG)
 # ============================================================
 with tab_log:
-    st.subheader("Ultima attività (cronoMacd.txt)")
-    log_lines = tail_log(config.CRONO_FILE, n=500)
+    st.subheader("Ultima attività (%s)" % os.path.basename(crono_file))
+    log_lines = tail_log(crono_file, n=500)
     if not log_lines:
         st.caption("Nessuna attività registrata.")
     else:

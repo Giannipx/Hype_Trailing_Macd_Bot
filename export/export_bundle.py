@@ -27,28 +27,36 @@ EXCLUDE_DIRS = {
     ".vscode",
     ".idea",
     "backtest_output",
+    "output",
+    "export",
 }
 
 INCLUDE_EXTS = {".py", ".md", ".txt", ".json", ".example"}
 
 
 def get_project_files():
-    root = os.path.dirname(os.path.abspath(__file__))
+    export_dir = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.abspath(os.path.join(export_dir, ".."))
     file_list = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
         for f in sorted(filenames):
             if f in EXCLUDE_FILES:
                 continue
+            if (f.startswith("cronoMacd") or f.startswith("paper_wallet")
+                    or f.startswith("fileCicloStart") or f.startswith("bot_state")
+                    or f.endswith(".tmp")):
+                continue
             ext = os.path.splitext(f)[1].lower()
             if ext in INCLUDE_EXTS or f in ("Dockerfile", ".env.example", ".gitignore"):
                 rel_path = os.path.relpath(os.path.join(dirpath, f), root)
                 file_list.append((rel_path, os.path.join(dirpath, f)))
-    return root, sorted(file_list)
+    return root, export_dir, sorted(file_list)
 
 
-def create_bundle(root, file_list, out_file="HYPE_BOT_BUNDLE.txt"):
-    with open(os.path.join(root, out_file), "w", encoding="utf-8") as out:
+def create_bundle(out_dir, file_list, out_file="HYPE_BOT_BUNDLE.txt"):
+    target_path = os.path.join(out_dir, out_file)
+    with open(target_path, "w", encoding="utf-8") as out:
         out.write("=" * 80 + "\n")
         out.write("HYPE TRAIL BOT — CODEBASE COMPLETA DEL PROGETTO\n")
         out.write("File generato per analisi da parte di agenti AI esterni\n")
@@ -70,23 +78,23 @@ def create_bundle(root, file_list, out_file="HYPE_BOT_BUNDLE.txt"):
                 out.write(f"[Errore lettura file: {e}]\n")
             out.write("\n")
 
-    print(f"Creato file bundle unico: {out_file}")
+    print(f"Creato file bundle unico: {target_path}")
 
 
-def create_zip(root, file_list, out_zip="HYPE_BOT_CODE.zip"):
-    zip_path = os.path.join(root, out_zip)
+def create_zip(out_dir, file_list, out_zip="HYPE_BOT_CODE.zip"):
+    zip_path = os.path.join(out_dir, out_zip)
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for rel_path, full_path in file_list:
             zf.write(full_path, rel_path)
-    print(f"Creato archivio ZIP: {out_zip}")
+    print(f"Creato archivio ZIP: {zip_path}")
 
 
 def main():
-    root, files = get_project_files()
+    root, export_dir, files = get_project_files()
     print(f"Trovati {len(files)} file di codice/documentazione.")
-    create_bundle(root, files)
-    create_zip(root, files)
-    print("\nCompletato! Puoi allegare 'HYPE_BOT_BUNDLE.txt' oppure 'HYPE_BOT_CODE.zip' (1 solo file) all'AI esterna.")
+    create_bundle(export_dir, files)
+    create_zip(export_dir, files)
+    print("\nCompletato! File esportati in 'export/'.")
 
 
 if __name__ == "__main__":

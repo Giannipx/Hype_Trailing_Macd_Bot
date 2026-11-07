@@ -106,6 +106,14 @@ La dashboard mostra in tempo reale (auto-refresh regolabile nella sidebar):
 - Prezzo, candele, indicatori (MACD/Signal/Histogram, RSI, SMA20/50);
 - Log attività (`cronoMacd.txt`) con filtro libero.
 
+## Backtest Offline
+
+```
+python backtest/backtest.py --days 30 --file hype.txt --timeframes 1h
+```
+
+I report dettagliati dei trade (`trades_1h_30d.csv`) e i riepiloghi comparativi (`summary_30d.csv`) vengono generati automaticamente all'interno di `backtest/output/`.
+
 ## Come funziona
 
 1. `botMacd.py` calcola MACD/RSI/SMA/ADX sull'ultima candela del timeframe di trading e verifica il trend a 15m (prezzo vs EMA200, SMA20 e ADX >= soglia).
@@ -117,16 +125,23 @@ La dashboard mostra in tempo reale (auto-refresh regolabile nella sidebar):
    - **Trailing Exit MACD**: uscita in trailing al segnale di esaurimento (`Diminuzione Positivo` per Long, `Diminuzione Negativo` per Short).
 5. In reale gli ordini di stop usano `isMarket: True` per garantire l'esecuzione anche con volatilità elevata.
 
-## Struttura
+## Struttura del Progetto
 
+### File Principali del Bot (nella root)
 - `jbmainMacd.py` — entrypoint e parsing dei parametri.
 - `botMacd.py` — loop principale sui segnali, decide buy/sell/short/cover, TP e Hard Stop.
 - `trailMacd.py` — trailing stop dopo il segnale con protezione timeout e invalidazione breakdown (`buy`, `sell`, `short`, `cover`).
 - `indicators.py` — MACD/RSI/SMA/ADX in Python puro.
 - `config.py` — tutte le impostazioni di trading.
 - `hl.py` — unico wrapper per Hyperliquid (saldi, candele, ordini reali e simulati, logging).
-- `backtest.py` — motore di backtesting offline con supporto multi-timeframe e simulazione trailing stop.
 - `dashboard.py` — dashboard web Streamlit (parametri, saldi, indicatori, log).
+- `hype.txt` / `hyper_sol.txt` — configurazioni attive dei bot per HYPE e SOL.
+- `walletIniziale.txt` — saldi di riferimento per il reset del wallet paper.
+
+### Cartelle Organizzate
+- `backtest/` — motore di backtesting offline (`backtest/backtest.py`), ottimizzatore parametri (`backtest/optimize.py`), parametri storici/sperimentali (`backtest/params/`) e report CSV dei trade (`backtest/output/`).
+- `export/` — script di esportazione (`export/export_bundle.py`), bundle unico (`export/HYPE_BOT_BUNDLE.txt`) e archivio ZIP (`export/HYPE_BOT_CODE.zip`).
+- `docs/` — documentazione completa (`docs/README.md`, `docs/CLAUDE.md`).
 
 ## Avvertenze
 

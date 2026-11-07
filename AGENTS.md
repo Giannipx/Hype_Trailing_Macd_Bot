@@ -5,11 +5,14 @@ Python 3.9 trading bot for **Hyperliquid perpetuals** (adapted from a Binance sp
 ## Run
 
 ```
+# Avvio singolo o Dual-Bot (in due terminali separati):
 python jbmainMacd.py --file hype.txt
+python jbmainMacd.py --file hyper_sol.txt
 ```
 
 - The bot loops forever on MACD/RSI signals; `StopTrail` (trailMacd.py) follows price every `INTERVAL` seconds until its stop is touched, protected by timeout (`TRAIL_BUY_TIMEOUT`) and breakdown invalidation. Supports 4 actions: `buy`, `sell`, `short`, and `cover`.
 - Bi-directional SHORT module: enabled via `ENABLE_SHORT=y` in param file. When active, opens short positions during bearish trends (`Price < EMA200 and Price <= SMA20 * 1.015 and ADX >= threshold`) on MACD `Diminuzione Positivo` and covers on `Diminuzione Negativo`.
+- Multi-asset & Dual-Bot: file di runtime isolati per coin (`paper_wallet_{coin}.json`, `fileCicloStart_{coin}.txt`, `bot_state_{coin}.json`, `cronoMacd_{coin}.txt`) con fallback per HYPE, consentendo l'esecuzione parallela senza conflitti di stato.
 - Risk management in `botMacd.py`: partial take profit (50% at 1.5x ATR, trailing stop shifted to break-even: +0.20% for long, -0.20% for short) and dynamic ATR hard stop (`HARD_STOP_ATR_MULT`). `TREND_FLIP_EXIT` is optional and disabled by default (`n`). Rounding buffer ($0.50) in `can_open_buy` prevents float lockout.
 
 ## Live vs paper trading (`config.py`)
@@ -40,5 +43,7 @@ python jbmainMacd.py --file hype.txt
 - `indicators.py` — pure-Python MACD/RSI/SMA/ADX (no pandas/ta).
 - `config.py` — all trading/config knobs.
 - `hl.py` — single wrapper around Hyperliquid (balance, candles, orders, logging, paper wallet).
-- `backtest.py` — offline backtester supporting long-only and bi-directional trading, dynamic ATR stop, partial TP, and multi-timeframe analysis.
 - `dashboard.py` — optional Streamlit dashboard: `streamlit run dashboard.py -- --file hype.txt` (needs `streamlit`, added in `requirements.txt`); reads the same runtime files and live Hyperliquid data.
+- `backtest/` — offline backtester (`backtest/backtest.py`), grid-search optimizer (`backtest/optimize.py`), test params (`backtest/params/`), and CSV outputs (`backtest/output/`).
+- `export/` — single-bundle exporter (`export/export_bundle.py`), `HYPE_BOT_BUNDLE.txt`, and `HYPE_BOT_CODE.zip`.
+- `docs/` — project documentation (`docs/README.md`, `docs/CLAUDE.md`).
